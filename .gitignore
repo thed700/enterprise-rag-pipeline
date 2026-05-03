@@ -1,0 +1,29 @@
+# Secrets — NEVER commit these
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+.eggs/
+
+# Data & models
+data/chroma_db/
+*.pdf
+*.pkl
+
+# Testing
+.pytest_cache/
+htmlcov/
+.coverage
+
+# IDEs
+.vscode/
+.idea/
+
+# Docker
+*.tar.xz

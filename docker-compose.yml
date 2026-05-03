@@ -1,0 +1,55 @@
+# ─────────────────────────────────────────────
+# docker-compose.yml — Enterprise RAG System
+# Author: Akmal Raxmatov (github: thed700)
+# ─────────────────────────────────────────────
+
+version: "3.9"
+
+services:
+
+  # ── FastAPI Backend ──────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: rag-api
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      - ./data:/rag-system/data          # Persist ChromaDB across restarts
+      - ./app:/rag-system/app            # Hot-reload during development
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+
+  # ── Streamlit Frontend ───────────────────────
+  ui:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: rag-ui
+    command: streamlit run app/ui.py --server.port 8501 --server.address 0.0.0.0
+    ports:
+      - "8501:8501"
+    env_file:
+      - .env
+    environment:
+      - API_BASE=http://api:8000          # Internal Docker network routing
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  chroma_data:
+
+networks:
+  default:
+    name: rag-network
