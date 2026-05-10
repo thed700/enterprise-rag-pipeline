@@ -1,0 +1,30 @@
+# Secrets — must never be baked into the image
+.env
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Persisted data (mounted as volumes at runtime)
+data/chroma_db/
+data/bm25.pkl
+data/*.pdf
+data/*.txt
+
+# Dev artifacts
+.venv/
+venv/
+env/
+.git/
+.gitignore
+*.log
+htmlcov/
+.coverage
+
+# IDEs
+.vscode/
+.idea/

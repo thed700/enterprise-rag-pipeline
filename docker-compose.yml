@@ -1,0 +1,91 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# docker-compose.yml — AuraRAG v3.0.0
+# Author: Akmal Raxmatov (github: thed700)
+#
+# Changes v3.0.0:
+#   - Rebranded container names to aurarag_*
+#   - Added internal Docker network so the API port is NOT exposed to the host
+#     (reverse-proxy only). Remove the api ports: mapping in production.
+#   - ALLOWED_ORIGINS injected into api service to match the ui origin exactly
+#   - Ollama service documented; uncomment to enable local inference
+# ─────────────────────────────────────────────────────────────────────────────
+
+version: "3.9"
+
+services:
+
+  # ── FastAPI Backend ──────────────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runner
+    container_name: aurarag_api
+    # --workers 1 is intentional: the engine holds in-process state.
+    # See BUG-08 in the audit; Redis-backed session memory lands in v3.1.
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
+    ports:
+      # Remove this in production — expose only via a reverse proxy (nginx/Traefik)
+      - "8000:8000"
+    networks:
+      - internal
+    volumes:
+      - chroma_data:/app/data/chroma_db
+    env_file:
+      - .env
+    environment:
+      - LOG_LEVEL=INFO
+      # FIX BUG-09: explicit CORS origin list matching the ui service URL.
+      - ALLOWED_ORIGINS=http://localhost:8501,http://ui:8501
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  # ── Streamlit Frontend ───────────────────────────────────────────────────────
+  ui:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runner
+    container_name: aurarag_ui
+    command: streamlit run app/ui.py --server.port 8501 --server.address 0.0.0.0 --server.headless true
+    ports:
+      - "8501:8501"
+    networks:
+      - internal
+    env_file:
+      - .env
+    environment:
+      - API_BASE=http://api:8000
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Ollama (optional local LLM) ──────────────────────────────────────────────
+  # Uncomment to enable local model inference. Then select "Local (Ollama)" in the UI.
+  #
+  # ollama:
+  #   image: ollama/ollama:latest
+  #   container_name: aurarag_ollama
+  #   ports:
+  #     - "11434:11434"
+  #   networks:
+  #     - internal
+  #   volumes:
+  #     - ollama_data:/root/.ollama
+  #   restart: unless-stopped
+
+networks:
+  internal:
+    driver: bridge
+
+volumes:
+  chroma_data:
+    driver: local
+  # ollama_data:
+  #   driver: local
