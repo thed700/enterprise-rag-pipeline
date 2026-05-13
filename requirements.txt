@@ -1,0 +1,52 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# requirements.txt — AuraRAG v3.1.0
+#
+# CRITICAL FIX (BUG-A, BUG-J, BUG-K):
+#   'langchain-classic' is NOT a real PyPI package — removed.
+#   ConversationalRetrievalChain, ConversationBufferWindowMemory, and
+#   EnsembleRetriever all live in 'langchain' (the main package).
+#
+# CPU-only torch is installed first in the Dockerfile via the PyTorch index
+# to avoid pulling the 2 GB CUDA build from PyPI.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# LangChain — core + community + provider integrations
+langchain>=0.2.0
+langchain-core>=0.2.0
+langchain-community>=0.2.0
+langchain-text-splitters>=0.2.0
+# NOTE: NO 'langchain-classic' — it does not exist on PyPI (BUG-A/J/K fix)
+langchain-openai>=0.1.0
+langchain-anthropic>=0.1.0
+langchain-google-genai>=1.0.0
+langchain-ollama>=0.1.0
+
+# Vector store
+chromadb>=0.5.0
+
+# Embeddings + re-ranking (CPU-only torch installed separately in Dockerfile)
+sentence-transformers>=3.0.0
+
+# BM25
+rank-bm25>=0.2.2
+
+# Document loaders
+pypdf>=4.0.0
+unstructured>=0.14.0
+
+# API
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0
+python-multipart>=0.0.9
+pydantic>=2.7.0
+pydantic-settings>=2.3.0
+
+# Rate limiting (BUG-H fix)
+slowapi>=0.1.9
+
+# UI
+streamlit>=1.35.0
+requests>=2.32.0
+
+# Utilities
+python-dotenv>=1.0.0
