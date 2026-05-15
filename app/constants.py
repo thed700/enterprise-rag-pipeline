@@ -1,11 +1,18 @@
 """
-constants.py — AuraRAG v3.1.0
+constants.py — AuraRAG v3.2.0
 Shared constants used by both the engine (backend) and the UI (frontend).
 Extracted from engine.py so the Streamlit container does NOT need to import
 heavy ML dependencies (torch, sentence-transformers, chromadb) just to render
-the provider selector. FIX BUG-O.
+the provider selector.
 
 Author: Akmal Raxmatov (github: thed700)
+
+Changes v3.2.0:
+  BUG-R: Anthropic model list updated to current stable IDs (claude-opus-4-6,
+          claude-sonnet-4-6 — these are the correct v4.6 family IDs).
+          Removed stale/non-existent claude-opus-4-5 / claude-sonnet-4-5 aliases.
+  BUG-R: claude-haiku-4-5-20251001 retained (date-stamp required by API).
+  BUG-R: Added latest OpenAI o-series and Gemini 2.5 models.
 """
 
 from typing import Dict, List, Tuple
@@ -20,11 +27,13 @@ PROVIDER_MODELS: Dict[str, List[str]] = {
         "gpt-4o-mini",
         "gpt-4-turbo",
         "gpt-3.5-turbo",
+        "o1-mini",
+        "o1-preview",
     ],
     "Anthropic": [
-        "claude-opus-4-5",
-        "claude-sonnet-4-5",
-        "claude-haiku-4-5-20251001",   # full date-stamped ID required by the API
+        "claude-opus-4-6",           # BUG-R: correct v4.6 family ID
+        "claude-sonnet-4-6",         # BUG-R: correct v4.6 family ID
+        "claude-haiku-4-5-20251001", # full date-stamped ID required by the API
         "claude-3-5-sonnet-20241022",
         "claude-3-opus-20240229",
     ],

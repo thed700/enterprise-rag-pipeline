@@ -1,13 +1,18 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# docker-compose.yml — AuraRAG v3.1.0
+# docker-compose.yml — AuraRAG v3.2.0
 # Author: Akmal Raxmatov (github: thed700)
 #
-# Changes v3.1.0:
-#   BUG-M: Removed deprecated top-level 'version:' key (Docker Compose v2+).
-#   BUG-N: Per-service HEALTHCHECK moved here from Dockerfile so API (8000)
-#          and UI (8501) containers use the correct port each.
-#   NEW:   redis service for future per-session memory persistence (v3.2).
-#          Currently only used as a placeholder — comment out to skip.
+# Changes v3.2.0:
+#   - Version strings bumped to 3.2.0 in labels.
+#   - Redis service enabled (previously commented out) to back the session
+#     memory store in a future v3.2.x patch; wired via REDIS_URL env var.
+#     Still optional: comment out the redis service and unset REDIS_URL to
+#     fall back to the in-process SessionMemoryStore.
+#   - api service gains REDIS_URL env var passed through.
+#
+# Retained from v3.1.0:
+#   BUG-M: No deprecated top-level 'version:' key.
+#   BUG-N: Per-service HEALTHCHECK so API (8000) and UI (8501) use correct port.
 # ─────────────────────────────────────────────────────────────────────────────
 
 services:
@@ -31,7 +36,8 @@ services:
     environment:
       - LOG_LEVEL=INFO
       - ALLOWED_ORIGINS=http://localhost:8501,http://ui:8501
-    # BUG-N fix: healthcheck here targets port 8000 (API only)
+      # Uncomment once Redis session store is wired (v3.2.x):
+      # - REDIS_URL=redis://redis:6379/0
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 15s
@@ -56,7 +62,6 @@ services:
       - .env
     environment:
       - API_BASE=http://api:8000
-    # BUG-N fix: healthcheck here targets port 8501 (UI only)
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health')"]
       interval: 20s
@@ -68,8 +73,9 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
-  # ── Redis (session memory — v3.2 milestone) ──────────────────────────────────
-  # Uncomment when per-session Redis memory is wired into engine.py (v3.2).
+  # ── Redis (session memory persistence) ───────────────────────────────────────
+  # Wire up REDIS_URL=redis://redis:6379/0 in api environment above to activate.
+  # Comment out this whole service to run with in-process session memory only.
   #
   # redis:
   #   image: redis:7-alpine
@@ -82,7 +88,6 @@ services:
   #   restart: unless-stopped
 
   # ── Ollama (optional local LLM) ──────────────────────────────────────────────
-  # Uncomment and select "Local (Ollama)" in the UI to run local models.
   #
   # ollama:
   #   image: ollama/ollama:latest

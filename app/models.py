@@ -1,20 +1,20 @@
 """
-models.py — Pydantic Data Schemas v3.1.0
+models.py — Pydantic Data Schemas v3.2.0
 Author: Akmal Raxmatov (github: thed700)
 
-Changes v3.1.0:
-  BUG-L: HealthResponse.version now imports APP_VERSION from utils instead of
-          hardcoding the literal string — single source of truth.
-  BUG-P: QueryRequest gains optional session_id field for per-session memory.
-  NEW:   IngestResponse gains duplicates_skipped field (BUG-E).
-  NEW:   ProvidersResponse for the /providers endpoint.
-  NEW:   StreamQueryRequest mirrors QueryRequest for the SSE stream endpoint.
+Changes v3.2.0:
+  BUG-S: top_k was declared on QueryRequest but never forwarded to engine.query()
+          (the engine always used its default of 5). Now threaded through to
+          engine.query() and engine.stream_query() via the API layer.
+  BUG-T: IngestResponse.message typed as Optional[str] but was always populated.
+          Changed to str with a sensible default to reflect actual behaviour.
+  NEW:   StreamQueryRequest gains top_k field to match QueryRequest.
 """
 
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field, SecretStr
 
-from app.utils import APP_VERSION   # FIX BUG-L: single source of truth
+from app.utils import APP_VERSION   # single source of truth (BUG-L)
 
 
 class QueryRequest(BaseModel):
@@ -23,14 +23,15 @@ class QueryRequest(BaseModel):
     top_k:      int       = Field(default=5, ge=1, le=20)
     provider:   str       = Field(default="OpenAI")
     model:      str       = Field(default="gpt-4o-mini")
-    api_key:    SecretStr = Field(default=SecretStr(""))  # BUG-06: never logged
-    # FIX BUG-P: per-session memory isolation
+    api_key:    SecretStr = Field(default=SecretStr(""))  # never logged
     session_id: str       = Field(default="default", max_length=128)
 
 
 class StreamQueryRequest(BaseModel):
     """Schema for the /query/stream SSE endpoint."""
     question:   str       = Field(..., min_length=1, max_length=2000)
+    # BUG-S fix: top_k added so streaming respects the caller's preference
+    top_k:      int       = Field(default=5, ge=1, le=20)
     provider:   str       = Field(default="OpenAI")
     model:      str       = Field(default="gpt-4o-mini")
     api_key:    SecretStr = Field(default=SecretStr(""))
@@ -50,10 +51,11 @@ class QueryResponse(BaseModel):
 
 
 class IngestResponse(BaseModel):
-    chunks_ingested:   int
-    duplicates_skipped: int = 0   # BUG-E: surfaced in API response
-    status:            str
-    message:           Optional[str] = None
+    chunks_ingested:    int
+    duplicates_skipped: int = 0
+    status:             str
+    # BUG-T fix: always populated — changed from Optional[str] to str
+    message:            str = ""
 
 
 class HealthResponse(BaseModel):
@@ -62,7 +64,7 @@ class HealthResponse(BaseModel):
     bm25_index:      str
     docs_indexed:    str
     active_sessions: str = "0"
-    version:         str = APP_VERSION   # FIX BUG-L
+    version:         str = APP_VERSION   # single source of truth (BUG-L)
 
 
 class ProvidersResponse(BaseModel):

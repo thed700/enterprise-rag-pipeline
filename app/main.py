@@ -1,22 +1,20 @@
 """
-main.py — FastAPI Backend v3.1.0
+main.py — FastAPI Backend v3.2.0
 Author: Akmal Raxmatov (github: thed700)
 
-Bug fixes in v3.1.0:
-  BUG-F: MAX_UPLOAD_MB enforced — file size checked before reading into memory.
-  BUG-G: upload.read() replaced with chunked streaming write to temp file,
-          halving peak RAM usage for large PDFs.
-  BUG-H: slowapi rate limiting added on /query (30/min) and /ingest (10/min).
-  BUG-M: deprecated 'version:' key removed from docker-compose (done there).
-  BUG-N: HEALTHCHECK moved to docker-compose per-service (done there).
-  BUG-P: session_id threaded through /query and /query/stream.
+Bug fixes in v3.2.0:
+  BUG-S: top_k now forwarded from QueryRequest / StreamQueryRequest into
+          engine.query() and engine.stream_query() — was silently dropped.
+  BUG-Q: setup_logging() now reads Settings.LOG_LEVEL (was always INFO).
+  BUG-W: TextLoader called with encoding="utf-8" and autodetect_encoding=True
+          to handle non-UTF-8 .txt uploads without raising UnicodeDecodeError.
 
-New in v3.1.0:
-  - GET  /providers  — returns PROVIDER_MODELS so the UI fetches it over HTTP
-                       instead of importing from engine.py (FIX BUG-O).
-  - POST /query/stream — true SSE streaming via engine.stream_query().
-  - DELETE /memory/{session_id} — clear a specific session.
-  - DELETE /memory  — clear ALL sessions (admin).
+Retained from v3.1.0:
+  BUG-F: MAX_UPLOAD_MB enforced — file size checked before reading into memory.
+  BUG-G: upload.read() replaced with chunked streaming write to temp file.
+  BUG-H: slowapi rate limiting on /query (30/min) and /ingest (10/min).
+  BUG-O: GET /providers returns PROVIDER_MODELS so the UI fetches it over HTTP.
+  BUG-P: session_id threaded through /query and /query/stream.
 """
 
 import asyncio
@@ -50,12 +48,13 @@ from app.models import (
 )
 from app.utils import APP_VERSION, get_settings, setup_logging
 
+# BUG-Q fix: setup_logging() now reads LOG_LEVEL from Settings
 setup_logging()
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
 # ─────────────────────────────────────────────
-# RATE LIMITER (BUG-H fix)
+# RATE LIMITER
 # ─────────────────────────────────────────────
 
 limiter = Limiter(key_func=get_remote_address)
@@ -81,7 +80,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="AuraRAG API",
     description=(
-        "Advanced Unified Retrieval Architecture v3.1.0. "
+        "Advanced Unified Retrieval Architecture v3.2.0. "
         "Hybrid Search + Cross-Encoder Re-ranking. "
         "LLM-agnostic: OpenAI · Anthropic · Gemini · Ollama. "
         "True SSE streaming. Per-session memory."
@@ -90,12 +89,11 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Rate limiter exception handler
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # ─────────────────────────────────────────────
-# CORS (BUG-09: explicit origins, never wildcard)
+# CORS
 # ─────────────────────────────────────────────
 
 _allowed_origins = [
@@ -119,14 +117,13 @@ app.add_middleware(
 # HELPERS
 # ─────────────────────────────────────────────
 
-_CHUNK_SIZE = 1024 * 256  # 256 KB streaming write chunks (BUG-G fix)
+_CHUNK_SIZE = 1024 * 256  # 256 KB streaming write chunks
 
 
 async def _stream_upload_to_tmp(upload: UploadFile, suffix: str) -> str:
     """
     Stream-write an uploaded file to a named temp file in 256 KB chunks.
-    FIX BUG-G: avoids loading the entire file into RAM before writing.
-    FIX BUG-F: enforces MAX_UPLOAD_MB limit during streaming.
+    Enforces MAX_UPLOAD_MB limit during streaming.
     Returns the temp file path.
     """
     max_bytes = settings.MAX_UPLOAD_MB * 1024 * 1024
@@ -172,10 +169,7 @@ async def health_check() -> HealthResponse:
 
 @app.get("/providers", response_model=ProvidersResponse, tags=["System"])
 async def list_providers() -> ProvidersResponse:
-    """
-    Returns the provider → model map.
-    FIX BUG-O: the UI fetches this instead of importing from app.engine.
-    """
+    """Returns the provider → model map."""
     return ProvidersResponse(providers=PROVIDER_MODELS)
 
 
@@ -189,7 +183,7 @@ async def list_providers() -> ProvidersResponse:
     status_code=status.HTTP_201_CREATED,
     tags=["Ingestion"],
 )
-@limiter.limit(settings.RATE_LIMIT_INGEST)   # BUG-H fix
+@limiter.limit(settings.RATE_LIMIT_INGEST)
 async def ingest_documents(
     request: Request,
     files: List[UploadFile] = File(...),
@@ -206,11 +200,15 @@ async def ingest_documents(
                 detail=f"Unsupported type '{suffix}'. Use .pdf or .txt.",
             )
 
-        # FIX BUG-05 + BUG-F + BUG-G: guarded, size-limited, chunked write
         tmp_path: str | None = None
         try:
             tmp_path = await _stream_upload_to_tmp(upload, suffix)
-            loader = PyPDFLoader(tmp_path) if suffix == ".pdf" else TextLoader(tmp_path)
+            if suffix == ".pdf":
+                loader = PyPDFLoader(tmp_path)
+            else:
+                # BUG-W fix: explicit UTF-8 + autodetect fallback avoids
+                # UnicodeDecodeError on non-UTF-8 text files in C-locale containers.
+                loader = TextLoader(tmp_path, encoding="utf-8", autodetect_encoding=True)
             docs = loader.load()
             for doc in docs:
                 doc.metadata["source"] = upload.filename
@@ -237,7 +235,7 @@ async def ingest_documents(
 # ─────────────────────────────────────────────
 
 @app.post("/query", response_model=QueryResponse, tags=["Retrieval"])
-@limiter.limit(settings.RATE_LIMIT_QUERY)   # BUG-H fix
+@limiter.limit(settings.RATE_LIMIT_QUERY)
 async def query_rag(request: Request, body: QueryRequest) -> QueryResponse:
     """
     RAG query: Hybrid Search → Re-rank → LLM → Answer.
@@ -251,8 +249,9 @@ async def query_rag(request: Request, body: QueryRequest) -> QueryResponse:
         question=body.question,
         provider=body.provider,
         model=body.model,
-        api_key=body.api_key.get_secret_value(),   # FIX BUG-06
-        session_id=body.session_id,                 # FIX BUG-P
+        api_key=body.api_key.get_secret_value(),
+        session_id=body.session_id,
+        top_k=body.top_k,          # BUG-S fix: forwarded
     )
 
     return QueryResponse(
@@ -268,7 +267,7 @@ async def query_rag(request: Request, body: QueryRequest) -> QueryResponse:
 async def query_stream(request: Request, body: StreamQueryRequest) -> StreamingResponse:
     """
     True SSE streaming query. Returns tokens as they arrive from the LLM.
-    v3.1.0: replaces the fake word-replay from v3.0.0 (FIX BUG-10).
+    BUG-V fix: chain exceptions now propagate to the SSE error frame.
     """
     eng = _engine_or_503()
     logger.info(f"[{body.session_id}] Stream query: '{body.question[:60]}'")
@@ -281,6 +280,7 @@ async def query_stream(request: Request, body: StreamQueryRequest) -> StreamingR
                 model=body.model,
                 api_key=body.api_key.get_secret_value(),
                 session_id=body.session_id,
+                top_k=body.top_k,   # BUG-S fix: forwarded
             ):
                 payload = json.dumps({"token": token})
                 yield f"data: {payload}\n\n"

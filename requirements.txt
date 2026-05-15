@@ -1,13 +1,14 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# requirements.txt — AuraRAG v3.1.0
+# requirements.txt — AuraRAG v3.2.0
 #
-# CRITICAL FIX (BUG-A, BUG-J, BUG-K):
-#   'langchain-classic' is NOT a real PyPI package — removed.
-#   ConversationalRetrievalChain, ConversationBufferWindowMemory, and
-#   EnsembleRetriever all live in 'langchain' (the main package).
+# Changes v3.2.0:
+#   BUG-W fix: python-magic added so TextLoader's autodetect_encoding works
+#              correctly on non-UTF-8 text files in constrained containers.
+#   Added redis client for future session persistence (docker-compose v3.2).
 #
-# CPU-only torch is installed first in the Dockerfile via the PyTorch index
-# to avoid pulling the 2 GB CUDA build from PyPI.
+# Retained from v3.1.0:
+#   BUG-A/J/K fix: NO 'langchain-classic' — it does not exist on PyPI.
+#   CPU-only torch is installed first in the Dockerfile via the PyTorch index.
 # ─────────────────────────────────────────────────────────────────────────────
 
 # LangChain — core + community + provider integrations
@@ -33,6 +34,8 @@ rank-bm25>=0.2.2
 # Document loaders
 pypdf>=4.0.0
 unstructured>=0.14.0
+# BUG-W fix: autodetect_encoding in TextLoader requires python-magic
+python-magic>=0.4.27
 
 # API
 fastapi>=0.111.0
@@ -41,7 +44,7 @@ python-multipart>=0.0.9
 pydantic>=2.7.0
 pydantic-settings>=2.3.0
 
-# Rate limiting (BUG-H fix)
+# Rate limiting
 slowapi>=0.1.9
 
 # UI
@@ -50,3 +53,6 @@ requests>=2.32.0
 
 # Utilities
 python-dotenv>=1.0.0
+
+# Session persistence (optional — activate via REDIS_URL env var)
+redis>=5.0.0
