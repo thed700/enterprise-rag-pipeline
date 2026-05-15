@@ -1,7 +1,22 @@
 # ◈ AuraRAG — Advanced Unified Retrieval Architecture
 
-**v3.1.0** · LLM-Agnostic Enterprise RAG Pipeline  
+**v3.2.0** · LLM-Agnostic Enterprise RAG Pipeline  
 Author: Akmal Raxmatov · [GitHub: thed700](https://github.com/thed700)
+
+---
+
+## What's New in v3.2.0
+
+| # | Fix | Impact |
+|---|-----|--------|
+| BUG-S | `top_k` from QueryRequest never forwarded to reranker — always defaulted to 5 | **Query results limited to 5 instead of requested** |
+| BUG-U | `SessionMemoryStore.clear()` left stale timestamp, sessions never auto-cleaned | Sessions accumulated indefinitely |
+| BUG-V | `stream_query()` silently swallowed exceptions in async chain, SSE hung forever | **Broken streaming on LLM errors** |
+| BUG-W | `TextLoader` without explicit encoding failed on non-UTF-8 .txt in `C` locale | **Non-UTF-8 text files crashed the app** |
+| BUG-X | BM25 pickle restore didn't rebuild `_seen_hashes` from legacy payloads | Duplicate chunks ingested after upgrade |
+| BUG-R | Anthropic/OpenAI model IDs stale (claude-opus-4-5 → claude-opus-4-6, removed o1-mini) | Users saw non-existent model options |
+| NEW | Atomic BM25 pickle writes (write .tmp then rename) | Prevents corrupt state if process killed mid-write |
+| NEW | `health()` now returns both `chroma_docs` and `bm25_docs` counts | Better observability |
 
 ---
 

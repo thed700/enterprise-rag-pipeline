@@ -1,8 +1,16 @@
 """
-ui.py — Streamlit Chat Interface v3.1.0
+ui.py — Streamlit Chat Interface v3.2.0
 Author: Akmal Raxmatov (github: thed700)
 
-Changes v3.1.0:
+Changes v3.2.0:
+  BUG-S: top_k from UI query now forwarded through the API to the engine
+         (was silently dropped, causing all queries to default to top_k=5).
+  BUG-R: Anthropic & OpenAI model lists updated to current stable IDs.
+         Removed stale model aliases (claude-opus-4-5 → claude-opus-4-6, etc.)
+  NEW:   Atomic BM25 pickle writes prevent corruption on process kill.
+  NEW:   Session memory cleanup on BM25 restore ensures no stale sessions.
+
+Retained from v3.1.0:
   BUG-O: No longer imports from app.engine. PROVIDER_MODELS and
           validate_provider_config are now fetched from the /providers API
           endpoint (with a fallback to constants.py for offline/dev mode).
