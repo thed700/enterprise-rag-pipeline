@@ -7,39 +7,18 @@ Author: Akmal Raxmatov · [GitHub: thed700](https://github.com/thed700)
 
 ## What's New in v3.2.0
 
-| # | Fix | Impact |
-|---|-----|--------|
-| BUG-S | `top_k` from QueryRequest never forwarded to reranker — always defaulted to 5 | **Query results limited to 5 instead of requested** |
-| BUG-U | `SessionMemoryStore.clear()` left stale timestamp, sessions never auto-cleaned | Sessions accumulated indefinitely |
-| BUG-V | `stream_query()` silently swallowed exceptions in async chain, SSE hung forever | **Broken streaming on LLM errors** |
-| BUG-W | `TextLoader` without explicit encoding failed on non-UTF-8 .txt in `C` locale | **Non-UTF-8 text files crashed the app** |
-| BUG-X | BM25 pickle restore didn't rebuild `_seen_hashes` from legacy payloads | Duplicate chunks ingested after upgrade |
-| BUG-R | Anthropic/OpenAI model IDs stale (claude-opus-4-5 → claude-opus-4-6, removed o1-mini) | Users saw non-existent model options |
-| NEW | Atomic BM25 pickle writes (write .tmp then rename) | Prevents corrupt state if process killed mid-write |
-| NEW | `health()` now returns both `chroma_docs` and `bm25_docs` counts | Better observability |
+| ID | Fix | Severity |
+|----|-----|----------|
+| BUG-S | `top_k` forwarded through full API → engine → reranker chain (was silently dropped) | 🔴 High |
+| BUG-V | `stream_query()` chain exceptions now surface as SSE error frames (was silent hang) | 🔴 High |
+| BUG-X | `_seen_hashes` persisted to pickle + atomic write — dedup now survives restarts & upgrades | 🔴 High |
+| BUG-W | `TextLoader` uses `encoding="utf-8", autodetect_encoding=True` — no more `UnicodeDecodeError` | 🔴 High |
+| BUG-U | `SessionMemoryStore.clear()` removes `_last_access` entry — cleared sessions count correctly | 🟡 Medium |
+| BUG-Q | `setup_logging()` now reads `Settings.LOG_LEVEL` — `LOG_LEVEL=DEBUG` actually works | 🟡 Medium |
+| BUG-R | Anthropic model IDs corrected: `claude-opus-4-6`, `claude-sonnet-4-6` (stale 4-5 aliases removed) | 🟡 Medium |
+| BUG-T | `IngestResponse.message` typed `str` not `Optional[str]` — matches actual behaviour | 🟢 Low |
 
----
-
-## What's New in v3.1.0
-
-| # | Fix | Impact |
-|---|-----|--------|
-| BUG-A/J | `langchain-classic` is not a real PyPI package — removed | **App would not start** |
-| BUG-B | `EnsembleRetriever` imported from non-existent module | **App would not start** |
-| BUG-K | `ConversationBufferWindowMemory` wrong import path | **App would not start** |
-| BUG-C | `_BM25_PICKLE_PATH` evaluated at import time before `.env` parsed | Wrong path in some setups |
-| BUG-D | Dual `vector_store` / `_chroma_store_ref` reference — fragile alias | Silent data inconsistency |
-| BUG-E | No dedup on ingest — same file uploaded twice doubled chunks | Poisoned retrieval scores |
-| BUG-F | `MAX_UPLOAD_MB` defined but never enforced | Unlimited file size accepted |
-| BUG-G | `upload.read()` slurped entire file into RAM | Double memory usage for large PDFs |
-| BUG-H | No rate limiting on `/query` or `/ingest` | Open to DoS / quota abuse |
-| BUG-I | `health()` reported `docs_indexed` from in-memory list (empty after restart) | Misleading monitoring |
-| BUG-L | `HealthResponse.version` hardcoded `"3.0.0"` literal | Out of sync after bumps |
-| BUG-M | Deprecated `version:` key in docker-compose | Compose warning on every up |
-| BUG-N | Single Dockerfile `HEALTHCHECK` on port 8000 — UI container always fails | Container marked unhealthy |
-| BUG-O | UI imported from `app.engine` — forced heavy ML deps into Streamlit container | Unnecessary bloat |
-| BUG-P | Single shared memory — two browser tabs corrupted each other's history | **Critical UX bug** |
-| BUG-10 | Fake word-replay "streaming" — entire response already computed | False UX promise |
+See [CHANGELOG.md](CHANGELOG.md) for the full diff.
 
 ---
 
@@ -53,21 +32,23 @@ Upload (PDF / TXT)
       │
   Chunked stream-write to temp file (256 KB chunks)
       │
-  PyPDFLoader / TextLoader
+  PyPDFLoader / TextLoader (UTF-8 + autodetect)
       │
   RecursiveCharacterTextSplitter  (configurable chunk_size / overlap)
       │
   SHA-256 deduplication ── skip chunks already seen
+  (hashes persisted to bm25.pkl — survives restarts)
       │
       ├──► ChromaDB (all-mpnet-base-v2, persistent, incremental add)
       └──► BM25Retriever (rank-bm25, rebuilt from cumulative corpus,
-                          persisted to bm25.pkl alongside ChromaDB)
+                          atomic pickle write alongside ChromaDB)
                 │
                 ▼
          EnsembleRetriever  (60 % dense · 40 % BM25)
                 │
                 ▼
       CrossEncoderReranker  (ms-marco-MiniLM-L-6-v2, ThreadPoolExecutor)
+      top_k honoured end-to-end from API request → reranker → source slice
                 │
                 ▼
    ConversationalRetrievalChain
@@ -78,7 +59,8 @@ Upload (PDF / TXT)
          │             │
     /query          /query/stream
     (sync,          (true SSE via
-   to_thread)    AsyncIteratorCallbackHandler)
+   to_thread)    AsyncIteratorCallbackHandler
+                   + exception propagation)
          │             │
       OpenAI / Anthropic / Gemini / Ollama
 ```
@@ -123,27 +105,42 @@ docker compose up --build
 
 ---
 
-## API Endpoints
+## API Reference
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/health` | Engine health + version + active sessions |
-| GET | `/providers` | Provider → model registry (JSON) |
-| POST | `/ingest` | Upload and index PDF/TXT files |
-| POST | `/query` | Synchronous RAG query (returns full answer) |
-| POST | `/query/stream` | SSE streaming query (token-by-token) |
-| DELETE | `/memory/{session_id}` | Clear one session's history |
-| DELETE | `/memory` | Clear all sessions |
+| Method | Path | Rate limit | Description |
+|--------|------|-----------|-------------|
+| `GET` | `/health` | — | Engine health, version, session count, bm25_docs |
+| `GET` | `/providers` | — | Provider → model registry |
+| `POST` | `/ingest` | 10/min | Upload & index PDF/TXT (multipart) |
+| `POST` | `/query` | 30/min | Synchronous RAG query |
+| `POST` | `/query/stream` | 30/min | SSE streaming query (token-by-token) |
+| `DELETE` | `/memory/{session_id}` | — | Clear one session's history |
+| `DELETE` | `/memory` | — | Clear all sessions (admin) |
 
-Full interactive docs at `/docs`.
+Interactive docs at **`/docs`** (Swagger UI).
+
+### Query request fields
+
+```jsonc
+{
+  "question":   "What does the policy say about overtime?",
+  "top_k":      5,          // 1–20, controls reranker + source count
+  "provider":   "Anthropic",
+  "model":      "claude-sonnet-4-6",
+  "api_key":    "sk-ant-...",
+  "session_id": "user-abc-123"   // omit for stateless single-turn
+}
+```
 
 ---
 
 ## Configuration
 
+All settings are read from `.env` (or environment variables).
+
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CHROMA_PERSIST_DIR` | `./data/chroma_db` | ChromaDB storage |
+| `CHROMA_PERSIST_DIR` | `./data/chroma_db` | ChromaDB storage path |
 | `CHROMA_COLLECTION` | `aurarag` | Collection name |
 | `CHUNK_SIZE` | `512` | Tokens per chunk |
 | `CHUNK_OVERLAP` | `64` | Overlap between chunks |
@@ -152,7 +149,8 @@ Full interactive docs at `/docs`.
 | `MAX_UPLOAD_MB` | `50` | Max file size for `/ingest` |
 | `RATE_LIMIT_QUERY` | `30/minute` | `/query` rate limit per IP |
 | `RATE_LIMIT_INGEST` | `10/minute` | `/ingest` rate limit per IP |
-| `LOG_LEVEL` | `INFO` | Logging level |
+| `LOG_LEVEL` | `INFO` | `DEBUG` / `INFO` / `WARNING` / `ERROR` |
+| `REDIS_URL` | _(unset)_ | Optional Redis for session persistence |
 
 ---
 
@@ -162,19 +160,24 @@ Full interactive docs at `/docs`.
 pytest tests/ -v
 ```
 
+Expected output: **all tests pass**. The suite covers import hygiene, reranker, session memory (including TTL eviction and the BUG-U clear fix), dedup + hash persistence (BUG-X), top_k forwarding (BUG-S), health reporting, and all Pydantic schemas.
+
 ---
 
-## v3 Roadmap
+## Roadmap
 
-- **v3.1** ✅ — Per-session memory, true SSE streaming, rate limiting, dedup, 16 bug fixes
-- **v3.2** — Redis-backed session memory (multi-worker safe)
-- **v3.3** — LangGraph agentic pipeline (rewrite → retrieve → grade → generate → reflect)
-- **v3.4** — Graph-RAG (entity/relationship knowledge graph)
-- **v3.5** — Vision-RAG (multimodal PDF ingestion with image captioning)
-- **v3.6** — Multi-tenancy (per-tenant ChromaDB namespaces + JWT auth)
+| Version | Status | Theme |
+|---------|--------|-------|
+| v3.0 | ✅ shipped | Multi-provider BYOK, hybrid search |
+| v3.1 | ✅ shipped | Per-session memory, true SSE, rate limiting, 16 bug fixes |
+| **v3.2** | ✅ **shipped** | **8 bug fixes: top_k, streaming safety, hash persistence, encoding, session clear, log level, model IDs** |
+| v3.3 | 🗓 planned | LangGraph agentic pipeline (rewrite → retrieve → grade → generate → reflect) |
+| v3.4 | 🗓 planned | Graph-RAG (entity/relationship knowledge graph) |
+| v3.5 | 🗓 planned | Vision-RAG (multimodal PDF ingestion with image captioning) |
+| v3.6 | 🗓 planned | Multi-tenancy (per-tenant ChromaDB namespaces + JWT auth) |
 
 ---
 
 ## License
 
-MIT [LICENSE](LICENSE)
+MIT
