@@ -180,4 +180,4 @@ Expected output: **all tests pass**. The suite covers import hygiene, reranker, 
 
 ## License
 
-MIT
+MIT [LICENSE](LICENSE)
