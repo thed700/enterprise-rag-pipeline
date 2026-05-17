@@ -1,24 +1,23 @@
 # ◈ AuraRAG — Advanced Unified Retrieval Architecture
 
-**v3.2.0** · LLM-Agnostic Enterprise RAG Pipeline  
+**v3.3** · LLM-Agnostic Enterprise RAG Pipeline  
 Author: Akmal Raxmatov · [GitHub: thed700](https://github.com/thed700)
 
 ---
 
-## What's New in v3.2.0
+## What's New in v3.3
 
 | ID | Fix | Severity |
 |----|-----|----------|
-| BUG-S | `top_k` forwarded through full API → engine → reranker chain (was silently dropped) | 🔴 High |
-| BUG-V | `stream_query()` chain exceptions now surface as SSE error frames (was silent hang) | 🔴 High |
-| BUG-X | `_seen_hashes` persisted to pickle + atomic write — dedup now survives restarts & upgrades | 🔴 High |
-| BUG-W | `TextLoader` uses `encoding="utf-8", autodetect_encoding=True` — no more `UnicodeDecodeError` | 🔴 High |
-| BUG-U | `SessionMemoryStore.clear()` removes `_last_access` entry — cleared sessions count correctly | 🟡 Medium |
-| BUG-Q | `setup_logging()` now reads `Settings.LOG_LEVEL` — `LOG_LEVEL=DEBUG` actually works | 🟡 Medium |
-| BUG-R | Anthropic model IDs corrected: `claude-opus-4-6`, `claude-sonnet-4-6` (stale 4-5 aliases removed) | 🟡 Medium |
-| BUG-T | `IngestResponse.message` typed `str` not `Optional[str]` — matches actual behaviour | 🟢 Low |
+| BUG-Y | `CrossEncoderReranker` was initialized but **completely bypassed** in `query()` and `stream_query()` — both used `_build_hybrid_retriever()` directly. Reranker only ran in a standalone method no endpoint calls. Fixed with `RerankedRetriever(BaseRetriever)` now used in both paths. | 🔴 High |
+| BUG-Z | `arerank()` called deprecated `asyncio.get_event_loop()` inside a running loop — `DeprecationWarning` on Python 3.10+, will raise in future. Replaced with `asyncio.get_running_loop()`. | 🟡 Medium |
+| BUG-AA | `_api_stream()` sent no `top_k` to `/query/stream` — every streaming query silently fell back to server default of 5. `top_k` now included in the payload. | 🟡 Medium |
+| BUG-AB | `CrossEncoderReranker._executor` (ThreadPoolExecutor) never shut down — leaked OS threads on every hot-reload. Added `shutdown()` to reranker + engine, called from FastAPI lifespan cleanup. | 🟡 Medium |
+| BUG-AC | `_evict_stale()` read module-level constant `SESSION_TTL_MINUTES = 60` instead of `settings.SESSION_TTL_MINUTES` — setting the env var had zero effect. Now reads from settings at call time. | 🟡 Medium |
+| BUG-AD | `HealthResponse` was missing the `bm25_docs` field that `engine.health()` returns — FastAPI silently dropped it from every `/health` response. Added `bm25_docs: str = "0"` to the model. | 🟡 Medium |
+| BUG-AE | Source snippet truncation in `query()` was hardcoded to `[:300]`. Added `SOURCE_SNIPPET_LEN: int = 300` to `Settings` — tunable via `.env`. | 🟢 Low |
 
-See [CHANGELOG.md](CHANGELOG.md) for the full diff.
+See [CHANGELOG.md](CHANGELOG.md) for full history.
 
 ---
 
@@ -47,13 +46,14 @@ Upload (PDF / TXT)
          EnsembleRetriever  (60 % dense · 40 % BM25)
                 │
                 ▼
-      CrossEncoderReranker  (ms-marco-MiniLM-L-6-v2, ThreadPoolExecutor)
-      top_k honoured end-to-end from API request → reranker → source slice
+      RerankedRetriever  ← NEW in v3.3 (BUG-Y fix)
+      (wraps EnsembleRetriever + CrossEncoderReranker as one BaseRetriever
+       so reranking is active inside ConversationalRetrievalChain, not bypassed)
                 │
                 ▼
    ConversationalRetrievalChain
     + SessionMemoryStore  (per-session ConversationBufferWindowMemory k=20,
-                           TTL-based eviction, keyed by session_id)
+                           TTL-based eviction from settings, keyed by session_id)
                 │
          ┌──────┴──────┐
          │             │
@@ -150,7 +150,7 @@ All settings are read from `.env` (or environment variables).
 | `RATE_LIMIT_QUERY` | `30/minute` | `/query` rate limit per IP |
 | `RATE_LIMIT_INGEST` | `10/minute` | `/ingest` rate limit per IP |
 | `LOG_LEVEL` | `INFO` | `DEBUG` / `INFO` / `WARNING` / `ERROR` |
-| `REDIS_URL` | _(unset)_ | Optional Redis for session persistence |
+| `SOURCE_SNIPPET_LEN` | `300` | Source snippet chars returned per chunk *(new in v3.3)* |
 
 ---
 
@@ -160,7 +160,7 @@ All settings are read from `.env` (or environment variables).
 pytest tests/ -v
 ```
 
-Expected output: **all tests pass**. The suite covers import hygiene, reranker, session memory (including TTL eviction and the BUG-U clear fix), dedup + hash persistence (BUG-X), top_k forwarding (BUG-S), health reporting, and all Pydantic schemas.
+The suite covers all 7 v3.3 regressions (BUG-Y through BUG-AE) plus retained coverage for imports, reranker, session memory, TTL eviction, deduplication, hash persistence, top_k forwarding, health reporting, and all Pydantic schemas.
 
 ---
 
@@ -170,14 +170,15 @@ Expected output: **all tests pass**. The suite covers import hygiene, reranker, 
 |---------|--------|-------|
 | v3.0 | ✅ shipped | Multi-provider BYOK, hybrid search |
 | v3.1 | ✅ shipped | Per-session memory, true SSE, rate limiting, 16 bug fixes |
-| **v3.2** | ✅ **shipped** | **8 bug fixes: top_k, streaming safety, hash persistence, encoding, session clear, log level, model IDs** |
-| v3.3 | 🗓 planned | LangGraph agentic pipeline (rewrite → retrieve → grade → generate → reflect) |
-| v3.4 | 🗓 planned | Graph-RAG (entity/relationship knowledge graph) |
-| v3.5 | 🗓 planned | Vision-RAG (multimodal PDF ingestion with image captioning) |
-| v3.6 | 🗓 planned | Multi-tenancy (per-tenant ChromaDB namespaces + JWT auth) |
+| v3.2 | ✅ shipped | 8 bug fixes: top_k, streaming safety, hash persistence, encoding, session clear, log level, model IDs |
+| **v3.3** | ✅ **shipped** | **7 bug fixes: reranker bypass, thread leak, TTL env var, bm25_docs field, stream top_k, get_running_loop, snippet length** |
+| v3.4 | 🗓 planned | LangGraph agentic pipeline (rewrite → retrieve → grade → generate → reflect) |
+| v3.5 | 🗓 planned | Graph-RAG (entity/relationship knowledge graph) |
+| v3.6 | 🗓 planned | Vision-RAG (multimodal PDF ingestion with image captioning) |
+| v3.7 | 🗓 planned | Multi-tenancy (per-tenant ChromaDB namespaces + JWT auth) |
 
 ---
 
 ## License
 
-MIT [LICENSE](LICENSE)
+MIT

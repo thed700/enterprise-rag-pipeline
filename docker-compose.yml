@@ -1,9 +1,9 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# docker-compose.yml — AuraRAG v3.2.0
+# docker-compose.yml — AuraRAG v3.3
 # Author: Akmal Raxmatov (github: thed700)
 #
-# Changes v3.2.0:
-#   - Version strings bumped to 3.2.0 in labels.
+# Changes v3.3:
+#   - Version strings bumped to 3.3 in labels.
 #   - Redis service enabled (previously commented out) to back the session
 #     memory store in a future v3.2.x patch; wired via REDIS_URL env var.
 #     Still optional: comment out the redis service and unset REDIS_URL to

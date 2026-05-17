@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # scripts/release.sh — AuraRAG release helper
-# Usage: ./scripts/release.sh [tag]   e.g. ./scripts/release.sh v3.2.0
+# Usage: ./scripts/release.sh [tag]   e.g. ./scripts/release.sh v3.3
 set -euo pipefail
 
-TAG="${1:-v3.2.0}"
+TAG="${1:-v3.3}"
 
 echo "═══════════════════════════════════════════"
 echo "  AuraRAG — Preparing release ${TAG}"

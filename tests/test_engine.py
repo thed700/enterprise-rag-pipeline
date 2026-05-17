@@ -1,20 +1,24 @@
 """
-tests/test_engine.py — AuraRAG v3.2.0
+tests/test_engine.py — AuraRAG v3.3
 Author: Akmal Raxmatov (github: thed700)
 
 Run: pytest tests/ -v
 
-New tests in v3.2.0:
-  BUG-S regression: top_k forwarded from API layer to engine.query()
-  BUG-U regression: SessionMemoryStore.clear() removes _last_access entry
-  BUG-V regression: stream_query propagates chain exceptions
-  BUG-W regression: TextLoader uses UTF-8 + autodetect (checked in main)
-  BUG-X regression: _seen_hashes persisted to and restored from pickle
-  BUG-Q regression: setup_logging() respects LOG_LEVEL setting
-  BUG-R regression: constants contain correct Anthropic model IDs
+New tests in v3.3:
+  BUG-Y regression: RerankedRetriever is used (not raw hybrid) in query()
+  BUG-Z regression: arerank() uses get_running_loop(), not get_event_loop()
+  BUG-AA regression: _api_stream() payload includes top_k
+  BUG-AB regression: RAGEngine.shutdown() calls reranker.shutdown()
+  BUG-AC regression: _evict_stale() reads settings.SESSION_TTL_MINUTES
+  BUG-AD regression: HealthResponse model exposes bm25_docs field
+  BUG-AE regression: query() snippet length reads settings.SOURCE_SNIPPET_LEN
+
+Retained from v3.2.0:
+  BUG-S, BUG-U, BUG-V (structure), BUG-X, BUG-Q, BUG-R, BUG-T tests.
 """
 
 import asyncio
+import inspect
 import time
 import pytest
 from unittest.mock import MagicMock, patch, AsyncMock
@@ -135,6 +139,290 @@ class TestReranker:
         r = CrossEncoderReranker()
         assert r.rerank("q", [], top_k=5) == []
 
+    @patch("app.engine.CrossEncoder")
+    def test_shutdown_calls_executor_shutdown(self, mock_ce):
+        """BUG-AB: CrossEncoderReranker.shutdown() must release the executor."""
+        from app.engine import CrossEncoderReranker
+        r = CrossEncoderReranker()
+        with patch.object(r._executor, "shutdown") as mock_shutdown:
+            r.shutdown()
+        mock_shutdown.assert_called_once_with(wait=False)
+
+
+# ─────────────────────────────────────────────
+# BUG-AB regression — RAGEngine.shutdown()
+# ─────────────────────────────────────────────
+
+class TestEngineShutdown:
+    def test_engine_shutdown_calls_reranker_shutdown(self):
+        """BUG-AB: RAGEngine.shutdown() must delegate to reranker.shutdown()."""
+        engine, _ = _make_engine()
+        with patch.object(engine.reranker, "shutdown") as mock_shutdown:
+            engine.shutdown()
+        mock_shutdown.assert_called_once()
+
+
+# ─────────────────────────────────────────────
+# BUG-Z regression — arerank() uses get_running_loop
+# ─────────────────────────────────────────────
+
+class TestArerank:
+    @patch("app.engine.CrossEncoder")
+    def test_arerank_uses_get_running_loop(self, mock_ce):
+        """BUG-Z: arerank() must call asyncio.get_running_loop(), not get_event_loop()."""
+        import app.engine as eng_module
+        import inspect
+        src = inspect.getsource(eng_module.CrossEncoderReranker.arerank)
+        assert "get_running_loop" in src, \
+            "BUG-Z: arerank() must use asyncio.get_running_loop() (not get_event_loop())."
+        assert "get_event_loop" not in src, \
+            "BUG-Z: deprecated asyncio.get_event_loop() found in arerank()."
+
+
+# ─────────────────────────────────────────────
+# BUG-Y regression — RerankedRetriever used in query/stream
+# ─────────────────────────────────────────────
+
+class TestRerankedRetriever:
+    def test_reranked_retriever_exists(self):
+        """BUG-Y: RerankedRetriever must be importable from engine."""
+        from app.engine import RerankedRetriever
+        assert RerankedRetriever is not None
+
+    def test_build_reranked_retriever_returns_reranked_retriever(self):
+        """BUG-Y: _build_reranked_retriever() must return a RerankedRetriever."""
+        from app.engine import RerankedRetriever
+        engine, _ = _make_engine()
+        engine.ingest_documents(DOCS_A)
+        retriever = engine._build_reranked_retriever(top_k=3)
+        assert isinstance(retriever, RerankedRetriever)
+        assert retriever.top_k == 3
+
+    def test_query_uses_reranked_retriever_not_raw_hybrid(self):
+        """BUG-Y: query() must use _build_reranked_retriever(), bypassing the
+        raw hybrid retriever so the cross-encoder reranker is active."""
+        from app.engine import RerankedRetriever
+        engine, mock_store = _make_engine()
+        engine.ingest_documents(DOCS_A + DOCS_B)
+
+        captured_retrievers = []
+
+        def capturing_from_llm(llm, retriever, **kwargs):
+            captured_retrievers.append(retriever)
+            mock_chain = MagicMock()
+            mock_chain.invoke.return_value = {
+                "answer": "ok",
+                "source_documents": [],
+            }
+            return mock_chain
+
+        with patch("app.engine.build_llm"), \
+             patch("app.engine.ConversationalRetrievalChain.from_llm",
+                   side_effect=capturing_from_llm), \
+             patch.object(engine, "_build_hybrid_retriever"):
+            engine.query(
+                question="test",
+                provider="OpenAI",
+                model="gpt-4o-mini",
+                api_key="sk-test",
+                session_id="s1",
+                top_k=3,
+            )
+
+        assert len(captured_retrievers) == 1, "from_llm was not called."
+        assert isinstance(captured_retrievers[0], RerankedRetriever), (
+            "BUG-Y: query() must pass a RerankedRetriever to the chain, "
+            f"got {type(captured_retrievers[0]).__name__} instead."
+        )
+
+    def test_stream_query_uses_reranked_retriever(self):
+        """BUG-Y: stream_query() must also use _build_reranked_retriever()."""
+        from app.engine import RerankedRetriever
+        engine, mock_store = _make_engine()
+        engine.ingest_documents(DOCS_A)
+
+        captured_retrievers = []
+
+        def capturing_from_llm(llm, retriever, **kwargs):
+            captured_retrievers.append(retriever)
+            mock_chain = MagicMock()
+            mock_chain.invoke.return_value = {"answer": "ok"}
+            return mock_chain
+
+        async def run():
+            with patch("app.engine.build_llm"), \
+                 patch("app.engine.ConversationalRetrievalChain.from_llm",
+                       side_effect=capturing_from_llm), \
+                 patch("app.engine.AsyncIteratorCallbackHandler") as mock_cb_cls, \
+                 patch.object(engine, "_build_hybrid_retriever"):
+                mock_cb = MagicMock()
+                mock_cb.aiter = AsyncMock(return_value=aiter_of([]))
+                mock_cb_cls.return_value = mock_cb
+
+                async def noop_task():
+                    pass
+
+                with patch("asyncio.create_task", return_value=asyncio.ensure_future(noop_task())):
+                    tokens = []
+                    async for t in engine.stream_query(
+                        question="test",
+                        provider="OpenAI",
+                        model="gpt-4o-mini",
+                        api_key="sk-test",
+                        session_id="s2",
+                        top_k=2,
+                    ):
+                        tokens.append(t)
+
+        # Helper for async iteration
+        async def aiter_of(items):
+            for item in items:
+                yield item
+
+        asyncio.run(run())
+
+        assert len(captured_retrievers) == 1
+        assert isinstance(captured_retrievers[0], RerankedRetriever), (
+            "BUG-Y: stream_query() must pass a RerankedRetriever to the chain."
+        )
+
+
+# ─────────────────────────────────────────────
+# BUG-AC regression — SESSION_TTL_MINUTES from settings
+# ─────────────────────────────────────────────
+
+class TestSessionTTLFromSettings:
+    def test_evict_stale_reads_settings_not_constant(self):
+        """BUG-AC: _evict_stale() must read SESSION_TTL_MINUTES from settings,
+        not from the module-level constant, so .env changes take effect."""
+        from app.engine import SessionMemoryStore
+        import app.engine as eng_module
+        src = inspect.getsource(eng_module.SessionMemoryStore._evict_stale)
+        assert "get_settings" in src, \
+            "BUG-AC: _evict_stale() must call get_settings().SESSION_TTL_MINUTES."
+
+    def test_ttl_from_settings_is_respected(self):
+        """BUG-AC: a custom TTL from settings must drive eviction."""
+        from app.engine import SessionMemoryStore
+        from unittest.mock import MagicMock
+
+        mock_settings = MagicMock()
+        mock_settings.SESSION_TTL_MINUTES = 10  # 10-minute TTL
+
+        store = SessionMemoryStore(window_k=5)
+        store.get("alice")
+        # Make alice's last access 11 minutes ago
+        store._last_access["alice"] = time.monotonic() - (10 * 60 + 1)
+
+        with patch("app.engine.get_settings", return_value=mock_settings):
+            store._evict_stale()
+
+        assert store.active_sessions == 0, \
+            "BUG-AC: session should have been evicted using the settings TTL."
+
+
+# ─────────────────────────────────────────────
+# BUG-AD regression — HealthResponse.bm25_docs
+# ─────────────────────────────────────────────
+
+class TestHealthResponseModel:
+    def test_health_response_has_bm25_docs_field(self):
+        """BUG-AD: HealthResponse must declare bm25_docs so FastAPI serialises it."""
+        from app.models import HealthResponse
+        r = HealthResponse(
+            status="ok",
+            vector_store="ready",
+            bm25_index="ready",
+            docs_indexed="100",
+            bm25_docs="42",
+        )
+        assert r.bm25_docs == "42", \
+            "BUG-AD: HealthResponse.bm25_docs field is missing or incorrect."
+
+    def test_health_response_bm25_docs_defaults_to_zero(self):
+        """BUG-AD: bm25_docs must have a sensible default."""
+        from app.models import HealthResponse
+        r = HealthResponse(
+            status="ok",
+            vector_store="empty",
+            bm25_index="empty",
+            docs_indexed="0",
+        )
+        assert r.bm25_docs == "0"
+
+    def test_health_response_includes_bm25_docs_in_serialisation(self):
+        """BUG-AD: bm25_docs must appear in model_dump() so it reaches the API client."""
+        from app.models import HealthResponse
+        r = HealthResponse(
+            status="ok",
+            vector_store="ready",
+            bm25_index="ready",
+            docs_indexed="50",
+            bm25_docs="50",
+        )
+        data = r.model_dump()
+        assert "bm25_docs" in data, \
+            "BUG-AD: bm25_docs not present in serialised HealthResponse."
+
+
+# ─────────────────────────────────────────────
+# BUG-AE regression — SOURCE_SNIPPET_LEN from settings
+# ─────────────────────────────────────────────
+
+class TestSourceSnippetLen:
+    def test_query_respects_source_snippet_len_setting(self):
+        """BUG-AE: query() must use settings.SOURCE_SNIPPET_LEN for snippet
+        truncation, not a hardcoded literal."""
+        engine, mock_store = _make_engine()
+        engine.ingest_documents(DOCS_A + DOCS_B)
+
+        long_content = "A" * 600
+        fake_docs = [
+            Document(page_content=long_content, metadata={"source": "x.pdf"})
+        ]
+        mock_chain_result = {"answer": "ok", "source_documents": fake_docs}
+
+        mock_settings = MagicMock()
+        mock_settings.SOURCE_SNIPPET_LEN = 50   # intentionally short
+        mock_settings.SESSION_TTL_MINUTES = 60
+
+        with patch("app.engine.build_llm"), \
+             patch("app.engine.ConversationalRetrievalChain.from_llm") as mock_chain_cls, \
+             patch("app.engine.get_settings", return_value=mock_settings), \
+             patch.object(engine, "_build_reranked_retriever"):
+            mock_chain = MagicMock()
+            mock_chain.invoke.return_value = mock_chain_result
+            mock_chain_cls.return_value = mock_chain
+            result = engine.query(
+                question="test",
+                provider="OpenAI",
+                model="gpt-4o-mini",
+                api_key="sk-test",
+                session_id="s1",
+                top_k=5,
+            )
+
+        snippet = result["sources"][0]["content"]
+        assert len(snippet) <= 50, (
+            f"BUG-AE: snippet length {len(snippet)} exceeds SOURCE_SNIPPET_LEN=50. "
+            "Hardcoded [:300] was not replaced with settings.SOURCE_SNIPPET_LEN."
+        )
+
+
+# ─────────────────────────────────────────────
+# BUG-AA regression — top_k in _api_stream payload
+# ─────────────────────────────────────────────
+
+class TestStreamPayload:
+    def test_api_stream_includes_top_k(self):
+        """BUG-AA: _api_stream() must include top_k in the POST payload."""
+        import app.ui as ui_module
+        src = inspect.getsource(ui_module._api_stream)
+        assert "top_k" in src, (
+            "BUG-AA: _api_stream() payload is missing top_k. "
+            "Streaming always fell back to server default of 5."
+        )
+
 
 # ─────────────────────────────────────────────
 # SessionMemoryStore  (BUG-P + BUG-U)
@@ -178,10 +466,17 @@ class TestSessionMemoryStore:
 
     def test_ttl_eviction(self):
         from app.engine import SessionMemoryStore, SESSION_TTL_MINUTES
+        from unittest.mock import MagicMock
+
         store = SessionMemoryStore(window_k=5)
         store.get("old_session")
         store._last_access["old_session"] = time.monotonic() - (SESSION_TTL_MINUTES * 60 + 1)
-        store._evict_stale()
+
+        mock_settings = MagicMock()
+        mock_settings.SESSION_TTL_MINUTES = SESSION_TTL_MINUTES
+        with patch("app.engine.get_settings", return_value=mock_settings):
+            store._evict_stale()
+
         assert store.active_sessions == 0
 
 
@@ -207,18 +502,9 @@ class TestDeduplication:
     def test_seen_hashes_included_in_pickle_payload(self):
         """BUG-X: _seen_hashes must be explicitly saved in the BM25 pickle."""
         engine, _ = _make_engine()
-
         payloads_saved = []
 
-        import pickle
-        original_dump = pickle.dump
-
-        def capturing_dump(obj, f, *args, **kwargs):
-            payloads_saved.append(obj)
-            return original_dump(obj, f, *args, **kwargs)
-
         with patch("app.engine.RAGEngine._save_bm25_to_disk") as mock_save:
-            # Simulate save to capture payload structure
             def fake_save(self_inner=engine):
                 payloads_saved.append({
                     "retriever": engine._bm25_retriever,
@@ -240,11 +526,10 @@ class TestDeduplication:
 
 class TestTopKForwarding:
     def test_query_returns_top_k_sources(self):
-        """BUG-S: query() must slice source_documents to top_k, not always 3."""
+        """BUG-S: query() must slice source_documents to top_k."""
         engine, mock_store = _make_engine()
         engine.ingest_documents(DOCS_A + DOCS_B)
 
-        # Build mock chain result with 6 source docs
         fake_docs = [
             Document(page_content=f"doc {i}", metadata={"source": "x.pdf"})
             for i in range(6)
@@ -252,19 +537,19 @@ class TestTopKForwarding:
         mock_chain_result = {"answer": "ok", "source_documents": fake_docs}
 
         with patch("app.engine.build_llm"), \
-             patch("app.engine.ConversationalRetrievalChain.from_llm") as mock_chain_cls:
+             patch("app.engine.ConversationalRetrievalChain.from_llm") as mock_chain_cls, \
+             patch.object(engine, "_build_reranked_retriever"):
             mock_chain = MagicMock()
             mock_chain.invoke.return_value = mock_chain_result
             mock_chain_cls.return_value = mock_chain
-            with patch.object(engine, "_build_hybrid_retriever"):
-                result = engine.query(
-                    question="test",
-                    provider="OpenAI",
-                    model="gpt-4o-mini",
-                    api_key="sk-test",
-                    session_id="s1",
-                    top_k=2,     # request only top 2
-                )
+            result = engine.query(
+                question="test",
+                provider="OpenAI",
+                model="gpt-4o-mini",
+                api_key="sk-test",
+                session_id="s1",
+                top_k=2,
+            )
 
         assert len(result["sources"]) == 2, \
             f"BUG-S: expected 2 sources for top_k=2, got {len(result['sources'])}."
@@ -320,7 +605,7 @@ class TestHealth:
         assert h["active_sessions"] == "2"
 
     def test_health_includes_bm25_docs(self):
-        """v3.2.0: health() must report bm25_docs count."""
+        """v3.2.0+: health() must report bm25_docs count."""
         engine, _ = _make_engine()
         h = engine.health()
         assert "bm25_docs" in h, "health() must include bm25_docs field."
@@ -385,8 +670,6 @@ class TestLogging:
     def test_setup_logging_reads_log_level(self):
         """BUG-Q: setup_logging() must apply the LOG_LEVEL from Settings."""
         import logging
-        from unittest.mock import patch
-        # Patch get_settings to return DEBUG level
         mock_settings = MagicMock()
         mock_settings.LOG_LEVEL = "DEBUG"
         with patch("app.utils.get_settings", return_value=mock_settings):

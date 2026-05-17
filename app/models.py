@@ -1,14 +1,17 @@
 """
-models.py — Pydantic Data Schemas v3.2.0
+models.py — Pydantic Data Schemas v3.3
 Author: Akmal Raxmatov (github: thed700)
 
-Changes v3.2.0:
-  BUG-S: top_k was declared on QueryRequest but never forwarded to engine.query()
-          (the engine always used its default of 5). Now threaded through to
-          engine.query() and engine.stream_query() via the API layer.
-  BUG-T: IngestResponse.message typed as Optional[str] but was always populated.
-          Changed to str with a sensible default to reflect actual behaviour.
-  NEW:   StreamQueryRequest gains top_k field to match QueryRequest.
+Changes v3.3:
+  BUG-AD: HealthResponse was missing the bm25_docs field that engine.health()
+          returns and the v3.2.0 changelog documented.  FastAPI's response
+          serializer silently dropped it — every GET /health call returned
+          bm25_docs: undefined on the client side.
+          Fixed: added bm25_docs: str = "0" to HealthResponse.
+
+Retained from v3.2.0:
+  BUG-S: top_k threaded through QueryRequest / StreamQueryRequest to engine.
+  BUG-T: IngestResponse.message typed as str (not Optional[str]).
 """
 
 from typing import Any, Dict, List, Optional
@@ -63,6 +66,10 @@ class HealthResponse(BaseModel):
     vector_store:    str
     bm25_index:      str
     docs_indexed:    str
+    # BUG-AD fix: bm25_docs was returned by engine.health() and listed in the
+    # v3.2.0 changelog but was missing from this model.  FastAPI silently
+    # dropped the field from every /health response.
+    bm25_docs:       str = "0"
     active_sessions: str = "0"
     version:         str = APP_VERSION   # single source of truth (BUG-L)
 

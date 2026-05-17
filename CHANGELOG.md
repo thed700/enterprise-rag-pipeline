@@ -6,6 +6,26 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [3.3] — 2026-05-17
+
+### Fixed
+
+| ID | File(s) | Severity | Description |
+|----|---------|----------|-------------|
+| BUG-Y | `engine.py` | 🔴 High | `CrossEncoderReranker` was initialized and documented but completely bypassed in `query()` and `stream_query()` — both used `_build_hybrid_retriever()` directly, feeding raw hybrid results to the LLM. The reranker only ran in the standalone `retrieve()` method, which no API endpoint calls. Fixed: introduced `RerankedRetriever`, a `BaseRetriever` subclass wrapping hybrid search + cross-encoder reranking; `_build_reranked_retriever(top_k)` now used everywhere a retriever is passed to `ConversationalRetrievalChain`. |
+| BUG-Z | `engine.py` | 🟡 Medium | `CrossEncoderReranker.arerank()` called the deprecated `asyncio.get_event_loop()` inside a running event loop — `DeprecationWarning` on Python 3.10+, will `raise RuntimeError` in a future release. Fixed: replaced with `asyncio.get_running_loop()`. |
+| BUG-AA | `app/ui.py` | 🟡 Medium | `_api_stream()` sent no `top_k` field to `/query/stream` — every streaming query silently fell back to the server-side default of 5 regardless of the caller's preference. Fixed: `top_k` now included in the streaming POST payload, consistent with `_api_query()`. |
+| BUG-AB | `engine.py` · `main.py` | 🟡 Medium | `CrossEncoderReranker._executor` (a `ThreadPoolExecutor`) was never shut down, leaking OS threads on every hot-reload or graceful shutdown. Fixed: added `CrossEncoderReranker.shutdown()` and `RAGEngine.shutdown()`, called from the FastAPI lifespan cleanup block. |
+| BUG-AC | `engine.py` | 🟡 Medium | `SessionMemoryStore._evict_stale()` read the module-level constant `SESSION_TTL_MINUTES = 60` instead of `settings.SESSION_TTL_MINUTES`. Setting the env var in `.env` had zero effect at runtime. Fixed: `_evict_stale()` now calls `get_settings().SESSION_TTL_MINUTES`. |
+| BUG-AD | `models.py` | 🟡 Medium | `HealthResponse` was missing the `bm25_docs` field that `engine.health()` returns and the v3.2.0 changelog documented. FastAPI's response serialiser silently dropped the field from every `GET /health` response. Fixed: added `bm25_docs: str = "0"` to `HealthResponse`. |
+| BUG-AE | `engine.py` · `utils.py` | 🟢 Low | Source snippet truncation in `query()` was hardcoded to `[:300]` chars. Fixed: added `SOURCE_SNIPPET_LEN: int = 300` to `Settings` so operators can tune via `.env` without code changes. |
+
+### Tests
+- 9 new regression tests covering BUG-Y (retriever type in query + stream), BUG-Z (source inspection), BUG-AA (payload inspection), BUG-AB (shutdown delegation), BUG-AC (settings read), BUG-AD (model field + serialisation), BUG-AE (snippet length).
+- All v3.2.0 tests retained and passing.
+
+---
+
 ## [3.2.0] — 2026-05-16
 
 ### Fixed

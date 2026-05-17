@@ -1,42 +1,46 @@
 """
-engine.py — AuraRAG Core Engine v3.2.0
+engine.py — AuraRAG Core Engine v3.3
 Author: Akmal Raxmatov (github: thed700)
 
-BUG FIXES in v3.2.0 (on top of v3.1.0):
+BUG FIXES in v3.3 (on top of v3.2.0):
 
-  BUG-S: top_k from QueryRequest / StreamQueryRequest was never forwarded to
-          the engine — the reranker always defaulted to top_k=5. Fixed by
-          threading top_k through query() and stream_query() signatures and
-          passing it to retrieve().
+  BUG-Y: CrossEncoderReranker was initialized and documented but completely
+          bypassed in query() and stream_query() — both used
+          _build_hybrid_retriever() directly, feeding raw hybrid results
+          straight to the LLM.  The reranker only ran in the standalone
+          retrieve() method, which no API endpoint calls.
+          Fixed: introduced RerankedRetriever, a BaseRetriever subclass that
+          wraps hybrid search + cross-encoder reranking in one object.
+          _build_reranked_retriever(top_k) constructs it and is now used
+          everywhere a retriever is passed to ConversationalRetrievalChain.
 
-  BUG-U: SessionMemoryStore.clear() deleted the session memory object but left
-          the stale timestamp in _last_access, causing the session to be counted
-          as active and preventing fresh creation until the TTL expired.
-          Fixed: clear() now also removes the _last_access entry.
+  BUG-Z: CrossEncoderReranker.arerank() called the deprecated
+          asyncio.get_event_loop() inside an already-running event loop.
+          Python 3.10+ emits a DeprecationWarning; a future Python release
+          will raise RuntimeError.
+          Fixed: replaced with asyncio.get_running_loop().
 
-  BUG-V: stream_query() used asyncio.to_thread(chain.invoke, ...) while
-          simultaneously consuming the callback's async iterator. If chain.invoke
-          raised an exception the task silently swallowed it — the token loop
-          would hang waiting for [DONE] that never arrived.
-          Fixed: exception from the background task is re-raised into the
-          async generator so the SSE endpoint can emit a proper error frame.
+  BUG-AB: CrossEncoderReranker._executor (a ThreadPoolExecutor) was never
+          shut down.  Every hot-reload or graceful server restart leaked OS
+          threads until the process exited.
+          Fixed: added CrossEncoderReranker.shutdown() and RAGEngine.shutdown();
+          the FastAPI lifespan cleanup block calls engine.shutdown().
 
-  BUG-W: TextLoader was called without an explicit encoding, defaulting to the
-          OS locale (often 'utf-8' on Linux but not guaranteed). On containers
-          running 'C' locale this raised UnicodeDecodeError for any non-ASCII
-          .txt file. Fixed: TextLoader(path, encoding="utf-8", autodetect_encoding=True).
+  BUG-AC: SessionMemoryStore._evict_stale() used the module-level constant
+          SESSION_TTL_MINUTES = 60 instead of settings.SESSION_TTL_MINUTES,
+          so setting SESSION_TTL_MINUTES in .env had no effect at runtime.
+          Fixed: _evict_stale() now calls get_settings().SESSION_TTL_MINUTES.
 
-  BUG-X: _seen_hashes was rebuilt from _all_docs on BM25 restore, but
-          _all_docs was only populated from the pickle — if the pickle was
-          a legacy bare-BM25 (v3.0.0) there were no docs and _seen_hashes
-          stayed empty, allowing duplicate ingestion after an upgrade.
-          Fixed: _seen_hashes is now stored explicitly in the pickle payload.
+  BUG-AE: Source snippet truncation in query() was hardcoded to [:300].
+          Fixed: reads settings.SOURCE_SNIPPET_LEN so the value is tunable
+          via .env without code changes.
 
-NEW in v3.2.0:
-  - top_k plumbed all the way from API → engine → reranker
-  - Atomic BM25 pickle write (write to .tmp then rename) avoids corrupt
-    state if the process is killed mid-write
-  - health() returns bm25_docs count alongside chroma count
+Retained from v3.2.0:
+  BUG-S: top_k forwarded from API -> engine -> reranker.
+  BUG-U: SessionMemoryStore.clear() removes _last_access entry.
+  BUG-V: stream_query() propagates chain exceptions to SSE error frames.
+  BUG-W: TextLoader uses UTF-8 + autodetect_encoding.
+  BUG-X: _seen_hashes persisted in BM25 pickle; atomic pickle writes.
 """
 
 import asyncio
@@ -61,6 +65,7 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.documents import Document
 from langchain_core.language_models import BaseLanguageModel
 from langchain_core.prompts import PromptTemplate
+from langchain_core.retrievers import BaseRetriever
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from sentence_transformers import CrossEncoder
 
@@ -73,7 +78,8 @@ settings = get_settings()
 # Re-export so any legacy code that imported from engine still works
 __all__ = ["RAGEngine", "build_llm", "PROVIDER_MODELS", "validate_provider_config"]
 
-# Session memory TTL
+# Kept for import compatibility and tests — NOT used for actual eviction logic
+# after the BUG-AC fix.  _evict_stale() reads settings.SESSION_TTL_MINUTES.
 SESSION_TTL_MINUTES = 60
 
 # ─────────────────────────────────────────────
@@ -166,17 +172,78 @@ class CrossEncoderReranker:
         scores: List[float] = raw.tolist() if hasattr(raw, "tolist") else list(raw)
         ranked = sorted(zip(scores, documents), key=lambda x: x[0], reverse=True)
         logger.info(
-            f"Re-ranked {len(documents)} docs → top {top_k}. "
+            f"Re-ranked {len(documents)} docs -> top {top_k}. "
             f"Best score: {ranked[0][0]:.4f}"
         )
         return [doc for _, doc in ranked[:top_k]]
 
     async def arerank(self, query: str, documents: List[Document], top_k: int = 5) -> List[Document]:
-        """Non-blocking rerank: runs the CPU-bound inference in a thread pool."""
-        loop = asyncio.get_event_loop()
+        """Non-blocking rerank: runs the CPU-bound inference in a thread pool.
+
+        BUG-Z fix: replaced deprecated asyncio.get_event_loop() with
+        asyncio.get_running_loop() — the former raises DeprecationWarning in
+        Python 3.10+ when called from within a running event loop.
+        """
+        loop = asyncio.get_running_loop()   # BUG-Z fix
         return await loop.run_in_executor(
             self._executor, self.rerank, query, documents, top_k
         )
+
+    def shutdown(self) -> None:
+        """BUG-AB fix: shut down the thread pool to avoid OS thread leaks.
+
+        Call this once during application teardown (e.g. FastAPI lifespan
+        cleanup).  wait=False lets the process exit without blocking on any
+        in-flight rerank tasks.
+        """
+        self._executor.shutdown(wait=False)
+        logger.debug("CrossEncoderReranker executor shut down.")
+
+
+# ─────────────────────────────────────────────
+# RERANKED RETRIEVER  (BUG-Y fix)
+# ─────────────────────────────────────────────
+
+class RerankedRetriever(BaseRetriever):
+    """
+    BUG-Y fix: LangChain-compatible retriever that applies cross-encoder
+    re-ranking after hybrid search in one step.
+
+    Previously the CrossEncoderReranker was only called from retrieve(), a
+    standalone helper that no API endpoint actually invokes.  Both query() and
+    stream_query() passed _build_hybrid_retriever() directly to
+    ConversationalRetrievalChain, completely bypassing the reranker.
+
+    By packaging hybrid search + reranking into a single BaseRetriever
+    subclass the reranker is applied automatically whenever the chain fetches
+    context documents, with no changes required to the chain setup.
+    """
+
+    # Pydantic v2 fields — arbitrary_types_allowed is required because
+    # EnsembleRetriever and CrossEncoderReranker are not Pydantic models.
+    hybrid_retriever: Any
+    cross_encoder: Any
+    top_k: int = 5
+
+    model_config = {"arbitrary_types_allowed": True}
+
+    def _get_relevant_documents(
+        self,
+        query: str,
+        *,
+        run_manager=None,
+    ) -> List[Document]:
+        candidates = self.hybrid_retriever.invoke(query)
+        return self.cross_encoder.rerank(query, candidates, top_k=self.top_k)
+
+    async def _aget_relevant_documents(
+        self,
+        query: str,
+        *,
+        run_manager=None,
+    ) -> List[Document]:
+        candidates = self.hybrid_retriever.invoke(query)
+        return await self.cross_encoder.arerank(query, candidates, top_k=self.top_k)
 
 
 # ─────────────────────────────────────────────
@@ -186,7 +253,7 @@ class CrossEncoderReranker:
 class SessionMemoryStore:
     """
     Per-session windowed conversation memory.
-    Evicts sessions idle longer than SESSION_TTL_MINUTES.
+    Evicts sessions idle longer than settings.SESSION_TTL_MINUTES.
     """
 
     def __init__(self, window_k: int = 20) -> None:
@@ -223,7 +290,12 @@ class SessionMemoryStore:
         self._last_access.clear()
 
     def _evict_stale(self) -> None:
-        cutoff = time.monotonic() - SESSION_TTL_MINUTES * 60
+        # BUG-AC fix: read the TTL from settings at call time so that
+        # SESSION_TTL_MINUTES in .env takes effect.  The old code used the
+        # module-level constant SESSION_TTL_MINUTES = 60, which was never
+        # overridable via environment variables.
+        ttl_minutes = get_settings().SESSION_TTL_MINUTES
+        cutoff = time.monotonic() - ttl_minutes * 60
         stale = [sid for sid, t in self._last_access.items() if t < cutoff]
         for sid in stale:
             self._sessions.pop(sid, None)
@@ -250,11 +322,11 @@ def _content_hash(doc: Document) -> str:
 
 class RAGEngine:
     """
-    AuraRAG Enterprise Engine v3.2.0 — LLM-Agnostic.
+    AuraRAG Enterprise Engine v3.3 — LLM-Agnostic.
 
     Pipeline:
-      Ingest  → Chunk → Deduplicate → Embed → Store (ChromaDB + BM25)
-      Query   → Hybrid Search → Cross-Encoder Re-rank → LLM → Stream
+      Ingest  -> Chunk -> Deduplicate -> Embed -> Store (ChromaDB + BM25)
+      Query   -> Hybrid Search -> Cross-Encoder Re-rank -> LLM -> Stream
 
     Concurrency:
       Safe for --workers 1. Per-session memory via SessionMemoryStore.
@@ -263,7 +335,7 @@ class RAGEngine:
     """
 
     def __init__(self) -> None:
-        logger.info("Initialising AuraRAG Engine v3.2.0...")
+        logger.info("Initialising AuraRAG Engine v3.3...")
 
         self.embeddings = HuggingFaceEmbeddings(
             model_name="sentence-transformers/all-mpnet-base-v2",
@@ -407,6 +479,20 @@ class RAGEngine:
             weights=[0.6, 0.4],
         )
 
+    def _build_reranked_retriever(self, top_k: int = 5) -> RerankedRetriever:
+        """
+        BUG-Y fix: return a RerankedRetriever that combines hybrid search and
+        cross-encoder reranking in one BaseRetriever-compatible object.
+
+        Use this everywhere a retriever is passed to ConversationalRetrievalChain
+        so the reranker is active on every query, not only in retrieve().
+        """
+        return RerankedRetriever(
+            hybrid_retriever=self._build_hybrid_retriever(),
+            cross_encoder=self.reranker,
+            top_k=top_k,
+        )
+
     def retrieve(self, query: str, top_k: int = 5) -> List[Document]:
         """Standalone hybrid search + cross-encoder re-rank (no LLM)."""
         hybrid = self._build_hybrid_retriever()
@@ -437,7 +523,10 @@ class RAGEngine:
 
         chain = ConversationalRetrievalChain.from_llm(
             llm=llm,
-            retriever=self._build_hybrid_retriever(),
+            # BUG-Y fix: RerankedRetriever applies cross-encoder reranking
+            # inside the chain; previously used _build_hybrid_retriever()
+            # which completely bypassed the reranker.
+            retriever=self._build_reranked_retriever(top_k=top_k),
             memory=memory,
             combine_docs_chain_kwargs={"prompt": STRICT_PROMPT},
             return_source_documents=True,
@@ -447,9 +536,11 @@ class RAGEngine:
         logger.info(f"[{session_id}] Query via {provider}/{model} (top_k={top_k}): '{question[:80]}'")
         result = chain.invoke({"question": question})
 
-        # BUG-S fix: honour top_k when slicing source documents
+        # BUG-AE fix: snippet length now comes from settings.SOURCE_SNIPPET_LEN
+        # instead of being hardcoded to 300.
+        snippet_len = get_settings().SOURCE_SNIPPET_LEN
         sources = [
-            {"content": doc.page_content[:300], "metadata": doc.metadata}
+            {"content": doc.page_content[:snippet_len], "metadata": doc.metadata}
             for doc in result.get("source_documents", [])[:top_k]
         ]
 
@@ -475,8 +566,11 @@ class RAGEngine:
         Async generator that yields LLM tokens as they arrive.
         Consumed by the FastAPI /query/stream SSE endpoint.
 
-        BUG-V fix: exceptions from the background chain task are now properly
-        propagated into the generator so the SSE layer can emit an error frame
+        BUG-Y fix: now uses _build_reranked_retriever() so cross-encoder
+        reranking is active during streaming retrieval.
+
+        BUG-V fix: exceptions from the background chain task are properly
+        propagated into the generator so the SSE layer emits an error frame
         instead of hanging indefinitely.
         """
         if self.vector_store is None:
@@ -499,7 +593,8 @@ class RAGEngine:
 
         chain = ConversationalRetrievalChain.from_llm(
             llm=llm,
-            retriever=self._build_hybrid_retriever(),
+            # BUG-Y fix: use RerankedRetriever so reranking is active
+            retriever=self._build_reranked_retriever(top_k=top_k),
             memory=memory,
             combine_docs_chain_kwargs={"prompt": STRICT_PROMPT},
             return_source_documents=False,
@@ -538,6 +633,15 @@ class RAGEngine:
 
     def clear_all_memory(self) -> None:
         self._session_store.clear_all()
+
+    def shutdown(self) -> None:
+        """
+        BUG-AB fix: release all engine resources during application teardown.
+        Call from the FastAPI lifespan cleanup block (after `yield`) to avoid
+        OS thread leaks from the CrossEncoderReranker's ThreadPoolExecutor.
+        """
+        self.reranker.shutdown()
+        logger.info("AuraRAG Engine resources released.")
 
     def health(self) -> Dict[str, str]:
         try:

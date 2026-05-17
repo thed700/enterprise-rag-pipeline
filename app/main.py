@@ -1,8 +1,13 @@
 """
-main.py — FastAPI Backend v3.2.0
+main.py — FastAPI Backend v3.3
 Author: Akmal Raxmatov (github: thed700)
 
-Bug fixes in v3.2.0:
+Bug fixes in v3.3:
+  BUG-AB: engine.shutdown() now called in the FastAPI lifespan cleanup block
+          so CrossEncoderReranker's ThreadPoolExecutor is properly released
+          on graceful shutdown instead of leaking OS threads.
+
+Retained from v3.2.0:
   BUG-S: top_k now forwarded from QueryRequest / StreamQueryRequest into
           engine.query() and engine.stream_query() — was silently dropped.
   BUG-Q: setup_logging() now reads Settings.LOG_LEVEL (was always INFO).
@@ -75,12 +80,16 @@ async def lifespan(app: FastAPI):
     engine = RAGEngine()
     yield
     logger.info("AuraRAG API shutting down.")
+    # BUG-AB fix: release CrossEncoderReranker's ThreadPoolExecutor so
+    # graceful shutdown does not leak OS threads.
+    if engine is not None:
+        engine.shutdown()
 
 
 app = FastAPI(
     title="AuraRAG API",
     description=(
-        "Advanced Unified Retrieval Architecture v3.2.0. "
+        "Advanced Unified Retrieval Architecture v3.3. "
         "Hybrid Search + Cross-Encoder Re-ranking. "
         "LLM-agnostic: OpenAI · Anthropic · Gemini · Ollama. "
         "True SSE streaming. Per-session memory."
@@ -169,7 +178,7 @@ async def health_check() -> HealthResponse:
 
 @app.get("/providers", response_model=ProvidersResponse, tags=["System"])
 async def list_providers() -> ProvidersResponse:
-    """Returns the provider → model map."""
+    """Returns the provider -> model map."""
     return ProvidersResponse(providers=PROVIDER_MODELS)
 
 
@@ -238,7 +247,7 @@ async def ingest_documents(
 @limiter.limit(settings.RATE_LIMIT_QUERY)
 async def query_rag(request: Request, body: QueryRequest) -> QueryResponse:
     """
-    RAG query: Hybrid Search → Re-rank → LLM → Answer.
+    RAG query: Hybrid Search -> Re-rank -> LLM -> Answer.
     Pass session_id to maintain per-user conversation history.
     """
     eng = _engine_or_503()

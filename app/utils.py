@@ -1,10 +1,15 @@
 """
-utils.py — AuraRAG v3.2.0
+utils.py — AuraRAG v3.3
 Author: Akmal Raxmatov (github: thed700)
 
-Changes v3.2.0:
-  BUG-Q: setup_logging() always defaulted to INFO regardless of Settings.LOG_LEVEL.
-          Now reads settings at call time so LOG_LEVEL=DEBUG actually works.
+Changes v3.3:
+  BUG-AE: Added SOURCE_SNIPPET_LEN setting so the source-snippet truncation
+          in engine.query() is configurable via .env instead of being
+          hardcoded to 300 chars.
+
+Retained from v3.2.0:
+  BUG-Q: setup_logging() reads LOG_LEVEL from Settings instead of always
+         defaulting to INFO.
   NOTE:  lru_cache on get_settings() is intentional — Settings are immutable
          after process start (pydantic-settings reads .env once on construction).
          Cache avoids repeated disk reads. Call get_settings.cache_clear() in
@@ -16,7 +21,7 @@ import sys
 from functools import lru_cache
 from pydantic_settings import BaseSettings
 
-APP_VERSION = "3.2.0"
+APP_VERSION = "3.3"
 
 
 class Settings(BaseSettings):
@@ -56,6 +61,10 @@ class Settings(BaseSettings):
 
     # Streamlit
     STREAMLIT_PORT: int = 8501
+
+    # BUG-AE fix: source snippet length in query() was hardcoded to 300.
+    # Now configurable via .env so operators can tune without code changes.
+    SOURCE_SNIPPET_LEN: int = 300
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

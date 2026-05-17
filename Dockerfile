@@ -1,9 +1,9 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# Dockerfile — AuraRAG v3.2.0
+# Dockerfile — AuraRAG v3.3
 # Author: Akmal Raxmatov (github: thed700)
 #
-# Changes v3.2.0:
-#   - Version label bumped to 3.2.0
+# Changes v3.3:
+#   - Version label bumped to 3.3
 #   - Builder stage: added 'file' and 'libmagic1' for autodetect_encoding in
 #     TextLoader (BUG-W fix — required by python-magic on some distros).
 #   - Runner stage: libmagic1 carried through for runtime use.
@@ -70,7 +70,7 @@ USER appuser
 
 EXPOSE 8000 8501
 
-LABEL org.opencontainers.image.version="3.2.0" \
+LABEL org.opencontainers.image.version="3.3" \
       org.opencontainers.image.title="AuraRAG" \
       org.opencontainers.image.authors="Akmal Raxmatov"
 

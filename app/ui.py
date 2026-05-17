@@ -1,8 +1,14 @@
 """
-ui.py — Streamlit Chat Interface v3.1.0
+ui.py — Streamlit Chat Interface v3.3
 Author: Akmal Raxmatov (github: thed700)
 
-Changes v3.1.0:
+Changes v3.3:
+  BUG-AA: _api_stream() sent no top_k field to /query/stream so every
+           streaming query used the server default of 5 regardless of what
+           the user intended.  Fixed: top_k is now included in the payload,
+           consistent with _api_query().
+
+Retained from v3.1.0:
   BUG-O: No longer imports from app.engine. PROVIDER_MODELS and
           validate_provider_config are now fetched from the /providers API
           endpoint (with a fallback to constants.py for offline/dev mode).
@@ -206,9 +212,14 @@ def _api_stream(question: str, session_id: str) -> Generator[str, None, None]:
     """
     FIX BUG-10: real SSE streaming via /query/stream.
     Yields one token at a time as the LLM produces it.
+
+    BUG-AA fix: top_k is now included in the payload so the server honours
+    the caller preference. Previously it was absent, causing every streaming
+    request to silently fall back to the server-side default of 5.
     """
     payload = {
         "question":   question,
+        "top_k":      5,           # BUG-AA fix: was missing from stream payload
         "provider":   st.session_state.provider,
         "model":      st.session_state.model,
         "api_key":    st.session_state.api_key,
