@@ -1,1 +1,4 @@
-# AuraRAG — Advanced Unified Retrieval Architecture v3.1.0
+"""AuraRAG application package."""
+from app.utils import APP_VERSION
+__version__ = APP_VERSION
+

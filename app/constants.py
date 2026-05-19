@@ -1,17 +1,19 @@
 """
-constants.py — AuraRAG v3.2.0
+constants.py — AuraRAG v3.4
+Author: Akmal Raxmatov (github: thed700)
+
 Shared constants used by both the engine (backend) and the UI (frontend).
 Extracted from engine.py so the Streamlit container does NOT need to import
 heavy ML dependencies (torch, sentence-transformers, chromadb) just to render
 the provider selector.
 
-Author: Akmal Raxmatov (github: thed700)
-
-Changes v3.2.0:
-  BUG-R: Anthropic model list updated to current stable IDs (claude-opus-4-6,
-          claude-sonnet-4-6 — these are the correct v4.6 family IDs).
-          Removed stale/non-existent claude-opus-4-5 / claude-sonnet-4-5 aliases.
-  BUG-R: claude-haiku-4-5-20251001 retained (date-stamp required by API).
+Changes v3.2.0 (carried forward):
+  BUG-R: Anthropic model list updated to current stable IDs.
+          claude-opus-4-6 and claude-sonnet-4-6 are the correct v4.6 family
+          identifiers. Removed stale/non-existent aliases (claude-opus-4-5,
+          claude-sonnet-4-5).
+  BUG-R: claude-haiku-4-5-20251001 retained — full date-stamp is required
+          by the Anthropic API for this model.
   BUG-R: Added latest OpenAI o-series and Gemini 2.5 models.
 """
 
@@ -31,9 +33,9 @@ PROVIDER_MODELS: Dict[str, List[str]] = {
         "o1-preview",
     ],
     "Anthropic": [
-        "claude-opus-4-6",           # BUG-R: correct v4.6 family ID
-        "claude-sonnet-4-6",         # BUG-R: correct v4.6 family ID
-        "claude-haiku-4-5-20251001", # full date-stamped ID required by the API
+        "claude-opus-4-6",            # BUG-R: correct v4.6 family ID
+        "claude-sonnet-4-6",          # BUG-R: correct v4.6 family ID
+        "claude-haiku-4-5-20251001",  # full date-stamped ID required by the API
         "claude-3-5-sonnet-20241022",
         "claude-3-opus-20240229",
     ],
@@ -54,14 +56,15 @@ PROVIDER_MODELS: Dict[str, List[str]] = {
     ],
 }
 
-# Human-readable labels for models with long date-stamped IDs
+# Human-readable labels for models with long date-stamped IDs.
+# Used by the UI to display friendly names while passing the full ID to the API.
 MODEL_LABELS: Dict[str, str] = {
     "claude-haiku-4-5-20251001":  "claude-haiku-4-5",
     "claude-3-5-sonnet-20241022": "claude-3.5-sonnet",
     "claude-3-opus-20240229":     "claude-3-opus",
 }
 
-# API key prefix validation map
+# API key prefix validation map — used by validate_provider_config().
 KEY_PREFIXES: Dict[str, str] = {
     "OpenAI":        "sk-",
     "Anthropic":     "sk-ant-",
@@ -70,7 +73,12 @@ KEY_PREFIXES: Dict[str, str] = {
 
 
 def validate_provider_config(provider: str, api_key: str) -> Tuple[bool, str]:
-    """Lightweight key format validator — no network calls, no ML imports."""
+    """
+    Lightweight key-format validator — no network calls, no ML imports.
+
+    Returns (is_valid, message).  Used by the UI to give instant feedback
+    before submitting a query to the backend.
+    """
     if provider == "Local (Ollama)":
         return True, "Ollama runs locally — no key needed."
     if not api_key or len(api_key.strip()) < 8:
@@ -86,5 +94,5 @@ def validate_provider_config(provider: str, api_key: str) -> Tuple[bool, str]:
 
 
 def friendly_model_label(model_id: str) -> str:
-    """Return a human-readable label for a model ID."""
+    """Return a human-readable label for a model ID (falls back to the ID itself)."""
     return MODEL_LABELS.get(model_id, model_id)

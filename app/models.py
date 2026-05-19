@@ -1,27 +1,32 @@
 """
-models.py — Pydantic Data Schemas v3.3
+models.py — AuraRAG v3.4 Pydantic Data Schemas
 Author: Akmal Raxmatov (github: thed700)
 
-Changes v3.3:
-  BUG-AD: HealthResponse was missing the bm25_docs field that engine.health()
-          returns and the v3.2.0 changelog documented.  FastAPI's response
-          serializer silently dropped it — every GET /health call returned
-          bm25_docs: undefined on the client side.
-          Fixed: added bm25_docs: str = "0" to HealthResponse.
+Changes v3.4:
+  - QueryResponse extended with three observability fields populated by the
+    LangGraph pipeline:
+      pipeline_trace: List[str] — ordered node names executed per query.
+      graded_chunks:  int       — chunks that passed the Document Grader.
+      reflect_loops:  int       — self-correction loops performed.
+  - HealthResponse.version reflects APP_VERSION = "3.4".
 
-Retained from v3.2.0:
-  BUG-S: top_k threaded through QueryRequest / StreamQueryRequest to engine.
-  BUG-T: IngestResponse.message typed as str (not Optional[str]).
+Retained from v3.3:
+  BUG-AD: HealthResponse includes bm25_docs field (was silently dropped).
+  BUG-T:  IngestResponse.message typed as str (not Optional[str]).
+  BUG-S:  top_k present on QueryRequest / StreamQueryRequest.
+  BUG-L:  APP_VERSION imported from utils — single source of truth.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
+
 from pydantic import BaseModel, Field, SecretStr
 
-from app.utils import APP_VERSION   # single source of truth (BUG-L)
+from app.utils import APP_VERSION  # single source of truth (BUG-L)
 
 
 class QueryRequest(BaseModel):
-    """Schema for a /query request."""
+    """Schema for a POST /query request (non-streaming)."""
+
     question:   str       = Field(..., min_length=1, max_length=2000)
     top_k:      int       = Field(default=5, ge=1, le=20)
     provider:   str       = Field(default="OpenAI")
@@ -31,9 +36,10 @@ class QueryRequest(BaseModel):
 
 
 class StreamQueryRequest(BaseModel):
-    """Schema for the /query/stream SSE endpoint."""
+    """Schema for POST /query/stream (SSE)."""
+
     question:   str       = Field(..., min_length=1, max_length=2000)
-    # BUG-S fix: top_k added so streaming respects the caller's preference
+    # BUG-S fix (v3.2.0): top_k forwarded so streaming respects caller preference
     top_k:      int       = Field(default=5, ge=1, le=20)
     provider:   str       = Field(default="OpenAI")
     model:      str       = Field(default="gpt-4o-mini")
@@ -43,21 +49,36 @@ class StreamQueryRequest(BaseModel):
 
 class SourceDocument(BaseModel):
     content:  str
-    metadata: Dict[str, Any] = {}
+    metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
 class QueryResponse(BaseModel):
     answer:       str
-    sources:      List[SourceDocument] = []
-    chat_history: List[str] = []
-    session_id:   str = "default"
+    sources:      List[SourceDocument] = Field(default_factory=list)
+    chat_history: List[str]            = Field(default_factory=list)
+    session_id:   str                  = "default"
+
+    # v3.4 observability — populated by the LangGraph pipeline.
+    # Clients on older v3.3 contracts can ignore these fields safely.
+    pipeline_trace: List[str] = Field(
+        default_factory=list,
+        description="Ordered list of LangGraph node names executed for this query.",
+    )
+    graded_chunks: int = Field(
+        default=0,
+        description="Number of retrieved chunks that passed the Document Grader.",
+    )
+    reflect_loops: int = Field(
+        default=0,
+        description="Number of Reflect/Self-Correction loops performed.",
+    )
 
 
 class IngestResponse(BaseModel):
     chunks_ingested:    int
     duplicates_skipped: int = 0
     status:             str
-    # BUG-T fix: always populated — changed from Optional[str] to str
+    # BUG-T fix (v3.2.0): always populated — str, not Optional[str]
     message:            str = ""
 
 
@@ -66,14 +87,14 @@ class HealthResponse(BaseModel):
     vector_store:    str
     bm25_index:      str
     docs_indexed:    str
-    # BUG-AD fix: bm25_docs was returned by engine.health() and listed in the
-    # v3.2.0 changelog but was missing from this model.  FastAPI silently
-    # dropped the field from every /health response.
+    # BUG-AD fix (v3.3): bm25_docs was returned by engine.health() but was
+    # missing here, so FastAPI silently dropped it from every /health response.
     bm25_docs:       str = "0"
     active_sessions: str = "0"
-    version:         str = APP_VERSION   # single source of truth (BUG-L)
+    version:         str = APP_VERSION  # single source of truth (BUG-L)
 
 
 class ProvidersResponse(BaseModel):
-    """Response for GET /providers."""
+    """Response schema for GET /providers."""
+
     providers: Dict[str, List[str]]

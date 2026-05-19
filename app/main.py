@@ -1,38 +1,35 @@
 """
-main.py — FastAPI Backend v3.3
+main.py — AuraRAG FastAPI Backend v3.4
 Author: Akmal Raxmatov (github: thed700)
 
-Bug fixes in v3.3:
-  BUG-AB: engine.shutdown() now called in the FastAPI lifespan cleanup block
-          so CrossEncoderReranker's ThreadPoolExecutor is properly released
-          on graceful shutdown instead of leaking OS threads.
+Changes v3.4:
+  - Engine stored on app.state.engine so the query router's FastAPI Depends()
+    can access it without a module-level global.
+  - POST /query and POST /query/stream served from app/routers/query.py via
+    app.include_router().  All other routes (health, providers, ingest, memory)
+    remain inline for minimal change surface.
+  - Lifespan teardown: engine.shutdown() still called (BUG-AB fix preserved).
 
-Retained from v3.2.0:
-  BUG-S: top_k now forwarded from QueryRequest / StreamQueryRequest into
-          engine.query() and engine.stream_query() — was silently dropped.
-  BUG-Q: setup_logging() now reads Settings.LOG_LEVEL (was always INFO).
-  BUG-W: TextLoader called with encoding="utf-8" and autodetect_encoding=True
-          to handle non-UTF-8 .txt uploads without raising UnicodeDecodeError.
-
-Retained from v3.1.0:
-  BUG-F: MAX_UPLOAD_MB enforced — file size checked before reading into memory.
-  BUG-G: upload.read() replaced with chunked streaming write to temp file.
-  BUG-H: slowapi rate limiting on /query (30/min) and /ingest (10/min).
-  BUG-O: GET /providers returns PROVIDER_MODELS so the UI fetches it over HTTP.
-  BUG-P: session_id threaded through /query and /query/stream.
+Retained from v3.3 / v3.2.0 / v3.1.0:
+  BUG-AB: engine.shutdown() in lifespan cleanup block.
+  BUG-Q:  setup_logging() reads LOG_LEVEL from Settings.
+  BUG-W:  TextLoader uses UTF-8 + autodetect_encoding.
+  BUG-F:  MAX_UPLOAD_MB enforced during upload streaming.
+  BUG-G:  256 KB chunked streaming write to temp file.
+  BUG-H:  slowapi rate limiting on /ingest.
+  BUG-O:  GET /providers returns PROVIDER_MODELS.
+  BUG-P:  session_id threaded through all query endpoints.
 """
 
 import asyncio
-import json
 import logging
 import os
 import tempfile
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator, List
+from typing import List
 
-from fastapi import FastAPI, Request, UploadFile, File, HTTPException, status
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
@@ -43,19 +40,16 @@ from langchain_core.documents import Document
 from app.constants import PROVIDER_MODELS
 from app.engine import RAGEngine
 from app.models import (
-    IngestResponse,
     HealthResponse,
+    IngestResponse,
     ProvidersResponse,
-    QueryRequest,
-    QueryResponse,
-    SourceDocument,
-    StreamQueryRequest,
 )
+from app.routers.query import router as query_router
 from app.utils import APP_VERSION, get_settings, setup_logging
 
-# BUG-Q fix: setup_logging() now reads LOG_LEVEL from Settings
+# BUG-Q fix (v3.2.0): setup_logging() reads LOG_LEVEL from Settings
 setup_logging()
-logger = logging.getLogger(__name__)
+logger   = logging.getLogger(__name__)
 settings = get_settings()
 
 # ─────────────────────────────────────────────
@@ -68,29 +62,32 @@ limiter = Limiter(key_func=get_remote_address)
 # APP LIFECYCLE
 # ─────────────────────────────────────────────
 
-engine: RAGEngine | None = None
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global engine
     logger.info("=" * 60)
-    logger.info(f"  AuraRAG — Advanced Unified Retrieval Architecture  v{APP_VERSION}")
+    logger.info("  AuraRAG — Advanced Unified Retrieval Architecture  v%s", APP_VERSION)
     logger.info("=" * 60)
-    engine = RAGEngine()
+
+    eng = RAGEngine()
+    # Store on app.state so FastAPI Depends() in routers can access without
+    # importing a module-level global.
+    app.state.engine = eng
+
     yield
+
     logger.info("AuraRAG API shutting down.")
-    # BUG-AB fix: release CrossEncoderReranker's ThreadPoolExecutor so
-    # graceful shutdown does not leak OS threads.
-    if engine is not None:
-        engine.shutdown()
+    # BUG-AB fix (v3.3): release CrossEncoderReranker's ThreadPoolExecutor
+    # on graceful shutdown to avoid leaking OS threads.
+    app.state.engine.shutdown()
 
 
 app = FastAPI(
     title="AuraRAG API",
     description=(
-        "Advanced Unified Retrieval Architecture v3.3. "
-        "Hybrid Search + Cross-Encoder Re-ranking. "
+        "Advanced Unified Retrieval Architecture v3.4. "
+        "LangGraph Agentic Pipeline: Query Rewrite → Hybrid Retrieve → "
+        "Document Grade → Generate → Self-Correct. "
         "LLM-agnostic: OpenAI · Anthropic · Gemini · Ollama. "
         "True SSE streaming. Per-session memory."
     ),
@@ -123,17 +120,29 @@ app.add_middleware(
 )
 
 # ─────────────────────────────────────────────
+# INCLUDE ROUTERS
+# ─────────────────────────────────────────────
+
+app.include_router(query_router)
+
+# ─────────────────────────────────────────────
 # HELPERS
 # ─────────────────────────────────────────────
 
-_CHUNK_SIZE = 1024 * 256  # 256 KB streaming write chunks
+_CHUNK_SIZE = 1024 * 256  # 256 KB streaming write chunks  (BUG-G fix)
 
 
 async def _stream_upload_to_tmp(upload: UploadFile, suffix: str) -> str:
     """
     Stream-write an uploaded file to a named temp file in 256 KB chunks.
-    Enforces MAX_UPLOAD_MB limit during streaming.
-    Returns the temp file path.
+
+    BUG-F / BUG-G fix (v3.1.0):
+      BUG-F — MAX_UPLOAD_MB is enforced mid-stream; excess is rejected before
+              the full file is read into memory.
+      BUG-G — upload.read() is replaced with a chunked loop so large files
+              do not spike memory.
+
+    Returns the temp file path (caller is responsible for cleanup).
     """
     max_bytes = settings.MAX_UPLOAD_MB * 1024 * 1024
     total = 0
@@ -160,31 +169,34 @@ async def _stream_upload_to_tmp(upload: UploadFile, suffix: str) -> str:
     return path
 
 
-def _engine_or_503() -> RAGEngine:
-    if engine is None:
+def _engine_or_503(request: Request) -> RAGEngine:
+    eng: RAGEngine | None = getattr(request.app.state, "engine", None)
+    if eng is None:
         raise HTTPException(status_code=503, detail="Engine not initialised.")
-    return engine
+    return eng
 
 
 # ─────────────────────────────────────────────
 # ROUTES — System
 # ─────────────────────────────────────────────
 
+
 @app.get("/health", response_model=HealthResponse, tags=["System"])
-async def health_check() -> HealthResponse:
-    eng = _engine_or_503()
+async def health_check(request: Request) -> HealthResponse:
+    eng = _engine_or_503(request)
     return HealthResponse(status="ok", **eng.health())
 
 
 @app.get("/providers", response_model=ProvidersResponse, tags=["System"])
 async def list_providers() -> ProvidersResponse:
-    """Returns the provider -> model map."""
+    """Returns the provider → model map (BUG-O fix v3.1.0)."""
     return ProvidersResponse(providers=PROVIDER_MODELS)
 
 
 # ─────────────────────────────────────────────
 # ROUTES — Ingestion
 # ─────────────────────────────────────────────
+
 
 @app.post(
     "/ingest",
@@ -195,10 +207,16 @@ async def list_providers() -> ProvidersResponse:
 @limiter.limit(settings.RATE_LIMIT_INGEST)
 async def ingest_documents(
     request: Request,
-    files: List[UploadFile] = File(...),
+    files:   List[UploadFile] = File(...),
 ) -> IngestResponse:
-    """Upload and index PDF or TXT documents."""
-    eng = _engine_or_503()
+    """
+    Upload and index PDF or TXT documents.
+
+    Files are streamed to disk in 256 KB chunks (BUG-G) with a configurable
+    size cap (BUG-F).  TextLoader uses UTF-8 with autodetect fallback to
+    handle non-UTF-8 files in C-locale containers (BUG-W).
+    """
+    eng = _engine_or_503(request)
 
     all_docs: List[Document] = []
     for upload in files:
@@ -215,14 +233,14 @@ async def ingest_documents(
             if suffix == ".pdf":
                 loader = PyPDFLoader(tmp_path)
             else:
-                # BUG-W fix: explicit UTF-8 + autodetect fallback avoids
-                # UnicodeDecodeError on non-UTF-8 text files in C-locale containers.
+                # BUG-W fix (v3.2.0): explicit UTF-8 + autodetect fallback
+                # avoids UnicodeDecodeError on non-UTF-8 text files.
                 loader = TextLoader(tmp_path, encoding="utf-8", autodetect_encoding=True)
             docs = loader.load()
             for doc in docs:
                 doc.metadata["source"] = upload.filename
             all_docs.extend(docs)
-            logger.info(f"Loaded {len(docs)} page(s) from '{upload.filename}'.")
+            logger.info("Loaded %d page(s) from '%s'.", len(docs), upload.filename)
         finally:
             if tmp_path and os.path.exists(tmp_path):
                 os.unlink(tmp_path)
@@ -230,6 +248,8 @@ async def ingest_documents(
     if not all_docs:
         raise HTTPException(status_code=400, detail="No content could be extracted.")
 
+    # ingest_documents() is CPU-bound (chunk, embed, BM25 rebuild) — run in
+    # a worker thread to avoid blocking the event loop.
     result = await asyncio.to_thread(eng.ingest_documents, all_docs)
     return IngestResponse(
         chunks_ingested=result["chunks_ingested"],
@@ -240,87 +260,18 @@ async def ingest_documents(
 
 
 # ─────────────────────────────────────────────
-# ROUTES — Query
-# ─────────────────────────────────────────────
-
-@app.post("/query", response_model=QueryResponse, tags=["Retrieval"])
-@limiter.limit(settings.RATE_LIMIT_QUERY)
-async def query_rag(request: Request, body: QueryRequest) -> QueryResponse:
-    """
-    RAG query: Hybrid Search -> Re-rank -> LLM -> Answer.
-    Pass session_id to maintain per-user conversation history.
-    """
-    eng = _engine_or_503()
-    logger.info(f"[{body.session_id}] Query: '{body.question[:60]}'")
-
-    result = await asyncio.to_thread(
-        eng.query,
-        question=body.question,
-        provider=body.provider,
-        model=body.model,
-        api_key=body.api_key.get_secret_value(),
-        session_id=body.session_id,
-        top_k=body.top_k,          # BUG-S fix: forwarded
-    )
-
-    return QueryResponse(
-        answer=result["answer"],
-        sources=[SourceDocument(**s) for s in result["sources"]],
-        chat_history=result["chat_history"],
-        session_id=result["session_id"],
-    )
-
-
-@app.post("/query/stream", tags=["Retrieval"])
-@limiter.limit(settings.RATE_LIMIT_QUERY)
-async def query_stream(request: Request, body: StreamQueryRequest) -> StreamingResponse:
-    """
-    True SSE streaming query. Returns tokens as they arrive from the LLM.
-    BUG-V fix: chain exceptions now propagate to the SSE error frame.
-    """
-    eng = _engine_or_503()
-    logger.info(f"[{body.session_id}] Stream query: '{body.question[:60]}'")
-
-    async def event_generator() -> AsyncGenerator[str, None]:
-        try:
-            async for token in eng.stream_query(
-                question=body.question,
-                provider=body.provider,
-                model=body.model,
-                api_key=body.api_key.get_secret_value(),
-                session_id=body.session_id,
-                top_k=body.top_k,   # BUG-S fix: forwarded
-            ):
-                payload = json.dumps({"token": token})
-                yield f"data: {payload}\n\n"
-        except Exception as e:
-            logger.exception("Stream error")
-            yield f"data: {json.dumps({'error': str(e)})}\n\n"
-        finally:
-            yield "data: [DONE]\n\n"
-
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-        },
-    )
-
-
-# ─────────────────────────────────────────────
 # ROUTES — Session Memory
 # ─────────────────────────────────────────────
+
 
 @app.delete(
     "/memory/{session_id}",
     tags=["Session"],
     status_code=status.HTTP_204_NO_CONTENT,
 )
-async def clear_session_memory(session_id: str) -> None:
+async def clear_session_memory(session_id: str, request: Request) -> None:
     """Clear conversation history for a specific session."""
-    eng = _engine_or_503()
+    eng = _engine_or_503(request)
     eng.clear_memory(session_id)
 
 
@@ -329,8 +280,8 @@ async def clear_session_memory(session_id: str) -> None:
     tags=["Session"],
     status_code=status.HTTP_204_NO_CONTENT,
 )
-async def clear_all_memory() -> None:
+async def clear_all_memory(request: Request) -> None:
     """Clear ALL session memories (admin operation)."""
-    eng = _engine_or_503()
+    eng = _engine_or_503(request)
     eng.clear_all_memory()
     logger.info("All session memories cleared.")

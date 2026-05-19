@@ -1,58 +1,62 @@
-# ─────────────────────────────────────────────────────────────────────────────
-# requirements.txt — AuraRAG v3.2.0
+# requirements.txt — AuraRAG v3.4
 #
-# Changes v3.2.0:
-#   BUG-W fix: python-magic added so TextLoader's autodetect_encoding works
-#              correctly on non-UTF-8 text files in constrained containers.
-#   Added redis client for future session persistence (docker-compose v3.2).
+# Changes v3.4:
+#   Added langgraph>=0.2.0          — core dependency for the agentic pipeline.
+#   Added langgraph-checkpoint>=1.0.0 — required for StateGraph compilation.
 #
-# Retained from v3.1.0:
-#   BUG-A/J/K fix: NO 'langchain-classic' — it does not exist on PyPI.
-#   CPU-only torch is installed first in the Dockerfile via the PyTorch index.
-# ─────────────────────────────────────────────────────────────────────────────
+# Retained from v3.3 / v3.2.0:
+#   BUG-W fix: python-magic for TextLoader autodetect_encoding.
+#   CPU-only torch installed first in Dockerfile via the PyTorch index URL.
+#   NO 'langchain-classic' — it does not exist on PyPI.
 
-# LangChain — core + community + provider integrations
+# ── LangGraph — agentic pipeline (v3.4) ──────────────────────────────────────
+langgraph>=0.2.0
+langgraph-checkpoint>=1.0.0
+
+# ── LangChain — core + community + provider integrations ─────────────────────
 langchain>=0.2.0
 langchain-core>=0.2.0
 langchain-community>=0.2.0
 langchain-text-splitters>=0.2.0
-# NOTE: NO 'langchain-classic' — it does not exist on PyPI (BUG-A/J/K fix)
+# NOTE: 'langchain-classic' does NOT exist on PyPI — do not add it.
 langchain-openai>=0.1.0
 langchain-anthropic>=0.1.0
 langchain-google-genai>=1.0.0
 langchain-ollama>=0.1.0
 
-# Vector store
+# ── Vector store ──────────────────────────────────────────────────────────────
 chromadb>=0.5.0
 
-# Embeddings + re-ranking (CPU-only torch installed separately in Dockerfile)
+# ── Embeddings + re-ranking ───────────────────────────────────────────────────
+# CPU-only torch should be installed first in the Dockerfile via the PyTorch
+# index URL to avoid pulling the GPU variant (several GB).
 sentence-transformers>=3.0.0
 
-# BM25
+# ── BM25 ──────────────────────────────────────────────────────────────────────
 rank-bm25>=0.2.2
 
-# Document loaders
+# ── Document loaders ──────────────────────────────────────────────────────────
 pypdf>=4.0.0
 unstructured>=0.14.0
 # BUG-W fix: autodetect_encoding in TextLoader requires python-magic
 python-magic>=0.4.27
 
-# API
+# ── API ───────────────────────────────────────────────────────────────────────
 fastapi>=0.111.0
 uvicorn[standard]>=0.30.0
 python-multipart>=0.0.9
 pydantic>=2.7.0
 pydantic-settings>=2.3.0
 
-# Rate limiting
+# ── Rate limiting ─────────────────────────────────────────────────────────────
 slowapi>=0.1.9
 
-# UI
+# ── UI ────────────────────────────────────────────────────────────────────────
 streamlit>=1.35.0
 requests>=2.32.0
 
-# Utilities
+# ── Utilities ─────────────────────────────────────────────────────────────────
 python-dotenv>=1.0.0
 
-# Session persistence (optional — activate via REDIS_URL env var)
+# ── Session persistence (optional — activate via REDIS_URL env var) ───────────
 redis>=5.0.0
