@@ -25,6 +25,7 @@ import asyncio
 import logging
 import os
 import tempfile
+import json
 from contextlib import asynccontextmanager
 from typing import List
 
@@ -48,11 +49,10 @@ async def lifespan(app: FastAPI):
     global GLOBAL_ENGINE
     logger.info("Initializing AuraRAG Engine inside Lifespan...")
     try:
-        # Prevent lifespan from blocking uvicorn startup by assigning later
         GLOBAL_ENGINE = RAGEngine()
         app.state.engine = GLOBAL_ENGINE
     except Exception as e:
-        logger.error(f"Engine initialization deferred or failed: {e}")
+        logger.error(f"Engine initialization failed: {e}")
     yield
     if GLOBAL_ENGINE:
         try:
@@ -69,7 +69,7 @@ app = FastAPI(
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-# 100% Bulletproof CORS for Hugging Face
+# Absolute Wildcard CORS for Hugging Face Proxy Isolation
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -83,13 +83,12 @@ def _engine_or_503(request: Request) -> RAGEngine:
     if not engine:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="AuraRAG Engine is still initializing. Please retry in a few moments.",
+            detail="AuraRAG Engine is initializing. Please retry in a moment.",
         )
     return engine
 
 @app.get("/health", tags=["System"])
 async def health_check():
-    # Immediate 200 OK to unblock entrypoint.sh and Hugging Face router
     return {"status": "healthy", "engine": "ready" if GLOBAL_ENGINE else "initializing"}
 
 @app.get("/providers", tags=["System"])
@@ -101,9 +100,6 @@ async def get_providers(request: Request):
 @limiter.limit(settings.INGEST_RATE_LIMIT)
 async def ingest_files(request: Request, files: List[UploadFile] = File(...)) -> IngestResponse:
     eng = _engine_or_503(request)
-    from langchain_community.document_loaders import TextLoader
-    import pypdf
-    
     all_docs = []
     for upload in files:
         suffix = os.path.splitext(upload.filename or "")[1].lower()
@@ -128,12 +124,11 @@ async def ingest_files(request: Request, files: List[UploadFile] = File(...)) ->
     result = await asyncio.to_thread(eng.ingest_documents, all_docs)
     return IngestResponse(
         chunks_ingested=result["chunks_ingested"],
-        duplicates_skipped=result.get(\"duplicates_skipped\", 0),
+        duplicates_skipped=result.get("duplicates_skipped", 0),
         status=result["status"],
         message=f"Indexed {len(files)} file(s).",
     )
 
-# Basic stub endpoints to keep ui.py fully compatible
 @app.post("/query")
 async def query(request: Request, body: QueryRequest):
     eng = _engine_or_503(request)
