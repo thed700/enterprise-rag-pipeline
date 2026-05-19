@@ -111,14 +111,24 @@ _allowed_origins = [
     if o.strip()
 ]
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=_allowed_origins,
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "DELETE"],
-    allow_headers=["Content-Type", "Authorization"],
-)
-
+# Hugging Face va umumiy yulduzcha (*) holati uchun xavfsiz sozlama
+if "*" in _allowed_origins or not _allowed_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=False,  # Wildcard (*) ishlatganda false bo'lishi shart!
+        allow_methods=["GET", "POST", "DELETE"],
+        allow_headers=["Content-Type", "Authorization"],
+    )
+else:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_allowed_origins,
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "DELETE"],
+        allow_headers=["Content-Type", "Authorization"],
+    )
+    
 # ─────────────────────────────────────────────
 # INCLUDE ROUTERS
 # ─────────────────────────────────────────────
