@@ -7,8 +7,8 @@ export PYTHONPATH=$(pwd):$PYTHONPATH
 export ALLOWED_ORIGINS="*"
 export API_BASE="http://localhost:8000"
 
-# 3. Start FastAPI backend on all interfaces inside the container
-uvicorn main.py:app --host 0.0.0.0 --port 8000 --workers 1 &
+# 3. Start FastAPI backend on all interfaces inside the container targeting the app folder
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1 &
 
 # 4. Wait for the backend to be fully healthy before launching UI
 echo "Waiting for FastAPI backend to start..."

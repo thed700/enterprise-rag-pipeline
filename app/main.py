@@ -111,12 +111,12 @@ _allowed_origins = [
     if o.strip()
 ]
 
-# Hugging Face va umumiy yulduzcha (*) holati uchun xavfsiz sozlama
+# Safe configuration for Hugging Face wildcard (*) origins
 if "*" in _allowed_origins or not _allowed_origins:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
-        allow_credentials=False,  # Wildcard (*) ishlatganda false bo'lishi shart!
+        allow_credentials=False,  # Must be False when using wildcard (*)
         allow_methods=["GET", "POST", "DELETE"],
         allow_headers=["Content-Type", "Authorization"],
     )
@@ -128,7 +128,7 @@ else:
         allow_methods=["GET", "POST", "DELETE"],
         allow_headers=["Content-Type", "Authorization"],
     )
-    
+
 # ─────────────────────────────────────────────
 # INCLUDE ROUTERS
 # ─────────────────────────────────────────────
