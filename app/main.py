@@ -116,7 +116,7 @@ if "*" in _allowed_origins or not _allowed_origins:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
-        allow_credentials=False,  # Must be False when using wildcard (*)
+        allow_credentials=False,  # Must be False when using wildcard (*) in Hugging Face
         allow_methods=["GET", "POST", "DELETE"],
         allow_headers=["Content-Type", "Authorization"],
     )
