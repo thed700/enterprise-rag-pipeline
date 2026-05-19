@@ -1,16 +1,12 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# Dockerfile — AuraRAG v3.3
+# Dockerfile — AuraRAG v3.4.0
 # Author: Akmal Raxmatov (github: thed700)
 #
-# Changes v3.3:
-#   - Version label bumped to 3.3
-#   - Builder stage: added 'file' and 'libmagic1' for autodetect_encoding in
-#     TextLoader (BUG-W fix — required by python-magic on some distros).
-#   - Runner stage: libmagic1 carried through for runtime use.
-#
-# Retained from v3.1.0:
-#   BUG-N: HEALTHCHECK defined per-service in docker-compose.yml, not here.
-#   CPU-only torch installed from PyTorch wheel index (avoids 2 GB CUDA build).
+# Changes v3.4.0:
+#   - Migrated setup for Hugging Face Spaces deployment.
+#   - Exposed port 7860 to match Hugging Face default container routing.
+#   - Introduced entrypoint.sh orchestration to run both FastAPI and Streamlit.
+#   - Retained libmagic1 runtime dependencies (BUG-W fix) and multi-stage layout.
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ── Stage 1: dependency builder ───────────────────────────────────────────────
@@ -23,7 +19,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# BUG-W fix: libmagic1 needed by python-magic (autodetect_encoding in TextLoader)
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         libgomp1 \
@@ -31,8 +26,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-
-# CPU-only torch — avoids the 2 GB CUDA wheels from the default PyPI index
 RUN pip install --no-cache-dir \
         torch \
         --extra-index-url https://download.pytorch.org/whl/cpu
@@ -47,32 +40,37 @@ WORKDIR /app
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PYTHONPATH=/app
+    PYTHONPATH=/app \
+    API_BASE=http://localhost:8000
 
-# BUG-W fix: libmagic1 required at runtime for autodetect_encoding
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libgomp1 \
         libmagic1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Non-root user
+# Create a non-root system user for security compliance
 RUN useradd --create-home --shell /bin/bash appuser
 
 COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
 
-# Exclude .env, data/, __pycache__ via .dockerignore
+# Copy project source code with appropriate ownership
 COPY --chown=appuser:appuser . .
 
+# Initialize data directories and explicitly set user permissions
 RUN mkdir -p /app/data/chroma_db && chown -R appuser:appuser /app/data
+
+# ATTENTION: Grant execution permissions for the entrypoint orchestration script
+RUN chmod +x /app/entrypoint.sh && chown appuser:appuser /app/entrypoint.sh
 
 USER appuser
 
-EXPOSE 8000 8501
+# Hugging Face Spaces strictly routes inbound traffic via port 7860
+EXPOSE 7860
 
-LABEL org.opencontainers.image.version="3.3" \
+LABEL org.opencontainers.image.version="3.4.0" \
       org.opencontainers.image.title="AuraRAG" \
       org.opencontainers.image.authors="Akmal Raxmatov"
 
-# HEALTHCHECK defined per-service in docker-compose.yml (BUG-N)
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+# Execute the custom entrypoint script instead of a single service worker
+CMD ["./entrypoint.sh"]
