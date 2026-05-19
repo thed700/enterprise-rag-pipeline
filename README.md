@@ -1,3 +1,14 @@
+---
+title: AuraRAG — Enterprise RAG Pipeline
+emoji: 🚀
+colorFrom: blue
+colorTo: indigo
+sdk: docker
+app_port: 7860
+pinned: false
+license: mit
+---
+
 # ◈ AuraRAG — Advanced Unified Retrieval Architecture
 
 **v3.4** · Agentic Enterprise RAG Pipeline (LangGraph)
