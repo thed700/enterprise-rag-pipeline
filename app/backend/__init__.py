@@ -1,11 +1,11 @@
 """
-constants.py — AuraRAG compatibility shim.
+app.backend — lightweight backend namespace for AuraRAG.
 
-Legacy imports still resolve through this module. The canonical provider
-registry now lives in app.backend.models.
+Keep this module minimal so importing `app.backend.models` does not pull in
+any document loaders or other optional dependencies.
 """
 
-from app.backend.models import (
+from .models import (
     PROVIDER_MODELS,
     MODEL_LABELS,
     KEY_PREFIXES,

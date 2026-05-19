@@ -60,3 +60,9 @@ python-dotenv>=1.0.0
 
 # ── Session persistence (optional — activate via REDIS_URL env var) ───────────
 redis>=5.0.0
+
+# ── Structured ingestion / UI rendering ──────────────────────────────────────
+pandas>=2.2.0
+openpyxl>=3.1.0
+pyarrow>=16.0.0
+mistune>=3.0.0

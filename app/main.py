@@ -1,32 +1,15 @@
 """
-main.py — AuraRAG FastAPI Backend v3.4
-Author: Akmal Raxmatov (github: thed700)
-
-Changes v3.4:
-  - Engine stored on app.state.engine so the query router's FastAPI Depends()
-    can access it without a module-level global.
-  - POST /query and POST /query/stream served from app/routers/query.py via
-    app.include_router().  All other routes (health, providers, ingest, memory)
-    remain inline for minimal change surface.
-  - Lifespan teardown: engine.shutdown() still called (BUG-AB fix preserved).
-
-Retained from v3.3 / v3.2.0 / v3.1.0:
-  BUG-AB: engine.shutdown() in lifespan cleanup block.
-  BUG-Q:  setup_logging() reads LOG_LEVEL from Settings.
-  BUG-W:  TextLoader uses UTF-8 + autodetect_encoding.
-  BUG-F:  MAX_UPLOAD_MB enforced during upload streaming.
-  BUG-G:  256 KB chunked streaming write to temp file.
-  BUG-H:  slowapi rate limiting on /ingest.
-  BUG-O:  GET /providers returns PROVIDER_MODELS.
-  BUG-P:  session_id threaded through all query endpoints.
+main.py — AuraRAG FastAPI backend.
 """
+
+from __future__ import annotations
 
 import asyncio
 import logging
 import os
 import tempfile
-import json
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import List
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile, status
@@ -35,87 +18,147 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
-from app.config import settings
-from app.engine.pipeline import RAGEngine
-from app.schemas import IngestResponse, ProviderConfig, QueryRequest, QueryResponse
+from app.backend.ingest import load_documents_from_file
+from app.constants import PROVIDER_MODELS
+from app.engine import RAGEngine
+from app.models import HealthResponse, IngestResponse, ProvidersResponse
+from app.routers.query import router as query_router
+from app.utils import APP_VERSION, get_settings, setup_logging
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("AuraRAG")
+setup_logging()
+logger = logging.getLogger(__name__)
+settings = get_settings()
 
-GLOBAL_ENGINE = None
+limiter = Limiter(key_func=get_remote_address)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global GLOBAL_ENGINE
-    logger.info("Initializing AuraRAG Engine inside Lifespan...")
-    try:
-        GLOBAL_ENGINE = RAGEngine()
-        app.state.engine = GLOBAL_ENGINE
-    except Exception as e:
-        logger.error(f"Engine initialization failed: {e}")
+    logger.info("=" * 60)
+    logger.info("  AuraRAG — Advanced Unified Retrieval Architecture  v%s", APP_VERSION)
+    logger.info("=" * 60)
+    app.state.engine = RAGEngine()
     yield
-    if GLOBAL_ENGINE:
-        try:
-            GLOBAL_ENGINE.shutdown()
-        except Exception:
-            pass
+    logger.info("AuraRAG API shutting down.")
+    app.state.engine.shutdown()
 
-limiter = Limiter(key_func=get_remote_address)
 app = FastAPI(
     title="AuraRAG API",
-    version="3.4.0",
-    lifespan=lifespan
+    description=(
+        f"Advanced Unified Retrieval Architecture v{APP_VERSION}. "
+        "LangGraph Agentic Pipeline with streaming support."
+    ),
+    version=APP_VERSION,
+    lifespan=lifespan,
 )
+
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-# Absolute Wildcard CORS for Hugging Face Proxy Isolation
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+_allowed_origins = [
+    origin.strip()
+    for origin in os.environ.get(
+        "ALLOWED_ORIGINS",
+        "http://localhost:8501,http://127.0.0.1:8501",
+    ).split(",")
+    if origin.strip()
+]
+
+if "*" in _allowed_origins or not _allowed_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "DELETE"],
+        allow_headers=["Content-Type", "Authorization"],
+    )
+else:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_allowed_origins,
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "DELETE"],
+        allow_headers=["Content-Type", "Authorization"],
+    )
+
+app.include_router(query_router)
+
+_CHUNK_SIZE = 1024 * 256
+
+async def _stream_upload_to_tmp(upload: UploadFile, suffix: str) -> str:
+    max_bytes = settings.MAX_UPLOAD_MB * 1024 * 1024
+    total = 0
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        path = tmp.name
+        while True:
+            chunk = await upload.read(_CHUNK_SIZE)
+            if not chunk:
+                break
+            total += len(chunk)
+            if max_bytes and total > max_bytes:
+                tmp.close()
+                os.unlink(path)
+                raise HTTPException(
+                    status_code=413,
+                    detail=(
+                        f"File '{upload.filename}' exceeds the "
+                        f"{settings.MAX_UPLOAD_MB} MB upload limit."
+                    ),
+                )
+            tmp.write(chunk)
+
+    return path
 
 def _engine_or_503(request: Request) -> RAGEngine:
-    engine = getattr(request.app.state, "engine", GLOBAL_ENGINE)
-    if not engine:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="AuraRAG Engine is initializing. Please retry in a moment.",
-        )
-    return engine
+    eng: RAGEngine | None = getattr(request.app.state, "engine", None)
+    if eng is None:
+        raise HTTPException(status_code=503, detail="Engine not initialised.")
+    return eng
 
-@app.get("/health", tags=["System"])
-async def health_check():
-    return {"status": "healthy", "engine": "ready" if GLOBAL_ENGINE else "initializing"}
-
-@app.get("/providers", tags=["System"])
-async def get_providers(request: Request):
-    from app.constants import PROVIDER_MODELS
-    return PROVIDER_MODELS
-
-@app.post("/ingest", tags=["Ingestion"], response_model=IngestResponse)
-@limiter.limit(settings.INGEST_RATE_LIMIT)
-async def ingest_files(request: Request, files: List[UploadFile] = File(...)) -> IngestResponse:
+@app.get("/health", response_model=HealthResponse, tags=["System"])
+async def health_check(request: Request) -> HealthResponse:
     eng = _engine_or_503(request)
+    return HealthResponse(status="ok", **eng.health())
+
+@app.get("/providers", response_model=ProvidersResponse, tags=["System"])
+async def list_providers() -> ProvidersResponse:
+    return ProvidersResponse(providers=PROVIDER_MODELS)
+
+@app.post(
+    "/ingest",
+    response_model=IngestResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["Ingestion"],
+)
+@limiter.limit(settings.RATE_LIMIT_INGEST)
+async def ingest_documents(
+    request: Request,
+    files: List[UploadFile] = File(...),
+) -> IngestResponse:
+    """
+    Upload and index structured documents. PDF/TXT/CSV/JSON/XLSX/Parquet are supported.
+    """
+    eng = _engine_or_503(request)
+
+    upload_records: list[tuple[str, str]] = []
     all_docs = []
+
     for upload in files:
-        suffix = os.path.splitext(upload.filename or "")[1].lower()
-        if suffix != ".pdf":
-            continue
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-            content = await upload.read()
-            tmp.write(content)
-            tmp_path = tmp.name
+        suffix = Path(upload.filename or "").suffix.lower()
+        if suffix not in {".pdf", ".txt", ".csv", ".json", ".xlsx", ".xls", ".parquet"}:
+            raise HTTPException(
+                status_code=415,
+                detail=f"Unsupported type '{suffix}'. Use PDF, TXT, CSV, JSON, XLSX, or Parquet.",
+            )
+
+        tmp_path: str | None = None
         try:
-            from langchain_community.document_loaders import PyPDFLoader
-            loader = PyPDFLoader(tmp_path)
-            docs = loader.load()
+            tmp_path = await _stream_upload_to_tmp(upload, suffix)
+            docs = load_documents_from_file(tmp_path, original_name=upload.filename)
             all_docs.extend(docs)
+            logger.info("Loaded %d document chunk(s) from '%s'.", len(docs), upload.filename)
         finally:
-            if os.path.exists(tmp_path):
+            if tmp_path and os.path.exists(tmp_path):
                 os.unlink(tmp_path)
 
     if not all_docs:
@@ -129,24 +172,13 @@ async def ingest_files(request: Request, files: List[UploadFile] = File(...)) ->
         message=f"Indexed {len(files)} file(s).",
     )
 
-@app.post("/query")
-async def query(request: Request, body: QueryRequest):
-    eng = _engine_or_503(request)
-    res = eng.query(body.prompt, session_id=body.session_id)
-    return {"answer": res.get("answer", ""), "sources": res.get("sources", [])}
-
-@app.post("/query/stream")
-async def query_stream(request: Request, body: QueryRequest):
-    eng = _engine_or_503(request)
-    from fastapi.responses import StreamingResponse
-    async def dummy_stream():
-        res = eng.query(body.prompt, session_id=body.session_id)
-        yield f"data: {json.dumps({'token': res.get('answer', '')})}\n\n"
-        yield "data: [DONE]\n\n"
-    return StreamingResponse(dummy_stream(), media_type="text/event-stream")
-
-@app.delete("/memory/{session_id}")
-async def clear_session_memory(session_id: str, request: Request):
+@app.delete("/memory/{session_id}", tags=["Session"], status_code=status.HTTP_204_NO_CONTENT)
+async def clear_session_memory(session_id: str, request: Request) -> None:
     eng = _engine_or_503(request)
     eng.clear_memory(session_id)
-    return {"status": "cleared"}
+
+@app.delete("/memory", tags=["Session"], status_code=status.HTTP_204_NO_CONTENT)
+async def clear_all_memory(request: Request) -> None:
+    eng = _engine_or_503(request)
+    eng.clear_all_memory()
+    logger.info("All session memories cleared.")

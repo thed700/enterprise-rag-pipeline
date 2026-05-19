@@ -76,6 +76,7 @@ import os
 import pathlib
 import pickle
 import re
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import (
@@ -110,6 +111,32 @@ from app.utils import get_settings
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
+
+def _resolve_persist_dir(raw_path: str) -> pathlib.Path:
+    """
+    Resolve a writable persistence directory.
+
+    On Hugging Face Spaces and other constrained runtimes, the configured
+    directory may not be writable. In that case we fall back to a cache path
+    under the system temp directory so the app can still boot.
+    """
+    candidates = [
+        pathlib.Path(raw_path).expanduser(),
+        pathlib.Path(os.environ.get("AURARAG_CACHE_DIR", "" )).expanduser() if os.environ.get("AURARAG_CACHE_DIR") else None,
+        pathlib.Path(tempfile.gettempdir()) / "aurarag" / "chroma_db",
+    ]
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+            test_file = candidate / ".write_test"
+            test_file.write_text("ok", encoding="utf-8")
+            test_file.unlink(missing_ok=True)
+            return candidate
+        except Exception:
+            continue
+    return pathlib.Path(tempfile.gettempdir()) / "aurarag" / "chroma_db"
 
 # Re-export for legacy import compatibility
 __all__ = [
@@ -194,6 +221,7 @@ class GraphState(TypedDict, total=False):
     api_key:     str   # plaintext, short-lived per-request
     session_id:  str
     top_k:       int
+    system_prompts: Dict[str, str]  # optional prompt overrides from the UI
     chat_history_text: str  # pre-formatted string for prompt injection
 
     # ── Rewrite node ──────────────────────────
@@ -613,7 +641,7 @@ async def _node_rewrite(state: GraphState) -> Dict[str, Any]:
             "Return a short retrieval query with only the essential search terms."
         )
         response = await llm.ainvoke([
-            SystemMessage(content=_REWRITE_SYSTEM),
+            SystemMessage(content=(state.get('system_prompts', {}) or {}).get('rewrite', _REWRITE_SYSTEM) or _REWRITE_SYSTEM),
             HumanMessage(content=prompt),
         ])
         rewritten = str(getattr(response, "content", "")).strip() or question
@@ -704,7 +732,7 @@ async def _node_grade(state: GraphState) -> Dict[str, Any]:
             "Return strict JSON only."
         )
         response = await llm.ainvoke([
-            SystemMessage(content=_GRADE_SYSTEM),
+            SystemMessage(content=(state.get('system_prompts', {}) or {}).get('grade', _GRADE_SYSTEM) or _GRADE_SYSTEM),
             HumanMessage(content=prompt),
         ])
         parsed = _safe_json_object(str(getattr(response, "content", "")))
@@ -780,7 +808,7 @@ async def _node_generate(state: GraphState) -> Dict[str, Any]:
             ["generate"],
         )
         response = await llm.ainvoke([
-            SystemMessage(content=_GENERATE_SYSTEM),
+            SystemMessage(content=(state.get('system_prompts', {}) or {}).get('generate', _GENERATE_SYSTEM) or _GENERATE_SYSTEM),
             HumanMessage(content=(
                 f"Chat history:\n{history}\n\n"
                 f"Context:\n{context}\n\n"
@@ -849,7 +877,7 @@ async def _node_reflect(
             ["nostream", "reflect"],
         )
         response = await llm.ainvoke([
-            SystemMessage(content=_REFLECT_SYSTEM),
+            SystemMessage(content=(state.get('system_prompts', {}) or {}).get('reflect', _REFLECT_SYSTEM) or _REFLECT_SYSTEM),
             HumanMessage(content=(
                 f"Original question: {question}\n"
                 f"Rewritten query used: {rewritten_query}\n"
@@ -1005,8 +1033,9 @@ class RAGEngine:
             model_kwargs={"device": "cpu"},
         )
 
-        self.chroma_client = chromadb.PersistentClient(path=settings.CHROMA_PERSIST_DIR)
-        self._bm25_pickle_path = pathlib.Path(settings.CHROMA_PERSIST_DIR) / "bm25.pkl"
+        self._persist_dir = _resolve_persist_dir(settings.CHROMA_PERSIST_DIR)
+        self.chroma_client = chromadb.PersistentClient(path=str(self._persist_dir))
+        self._bm25_pickle_path = self._persist_dir / "bm25.pkl"
 
         self._chroma = Chroma(
             client=self.chroma_client,
@@ -1202,6 +1231,7 @@ class RAGEngine:
         api_key: str,
         session_id: str,
         top_k: int,
+        system_prompts: Optional[Dict[str, str]] = None,
     ) -> GraphState:
         """Assemble the initial GraphState before invoking the graph."""
         return GraphState(
@@ -1211,6 +1241,7 @@ class RAGEngine:
             api_key=api_key,
             session_id=session_id,
             top_k=top_k,
+            system_prompts=system_prompts or {},
             chat_history_text=self._session_store.format_history(session_id),
             rewritten_query="",
             reflection_feedback="",
@@ -1267,6 +1298,7 @@ class RAGEngine:
         api_key:    str,
         session_id: str = "default",
         top_k:      int = 5,
+        system_prompts: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         """
         Primary async query entrypoint.
@@ -1284,7 +1316,7 @@ class RAGEngine:
             }
 
         graph         = self._get_or_rebuild_graph(top_k=top_k)
-        initial_state = self._build_initial_state(question, provider, model, api_key, session_id, top_k)
+        initial_state = self._build_initial_state(question, provider, model, api_key, session_id, top_k, system_prompts=system_prompts)
 
         logger.info(
             "[%s] aquery via %s/%s (top_k=%d): %r",
@@ -1304,6 +1336,7 @@ class RAGEngine:
         api_key:    str,
         session_id: str = "default",
         top_k:      int = 5,
+        system_prompts: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         """
         Synchronous entrypoint retained for backward-compatibility with tests.
@@ -1338,6 +1371,7 @@ class RAGEngine:
         api_key:    str,
         session_id: str = "default",
         top_k:      int = 5,
+        system_prompts: Optional[Dict[str, str]] = None,
     ) -> AsyncGenerator[str, None]:
         """
         Async generator that streams tokens from the Generate node.
@@ -1363,7 +1397,7 @@ class RAGEngine:
             return
 
         graph         = self._get_or_rebuild_graph(top_k=top_k)
-        initial_state = self._build_initial_state(question, provider, model, api_key, session_id, top_k)
+        initial_state = self._build_initial_state(question, provider, model, api_key, session_id, top_k, system_prompts=system_prompts)
 
         logger.info(
             "[%s] stream_query via %s/%s (top_k=%d): %r",
