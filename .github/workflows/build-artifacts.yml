@@ -1,122 +1,351 @@
-name: Build AuraRAG Artifacts
+# .github/workflows/build-artifacts.yml
+# AuraRAG v4.0 — Standalone Build Pipeline
+# Author: Akmal Raxmatov (github: thed700)
+#
+# Jobs:
+#   build-windows  — Packages the FastAPI backend + Streamlit frontend into
+#                    a single Windows .exe via PyInstaller.
+#   build-android  — Wraps the deployed AuraRAG frontend URL in a Capacitor
+#                    WebView app and produces a signed debug .apk via Gradle.
+#
+# Triggers:
+#   • Push to `main` or `release/**` branches
+#   • Manual dispatch with optional version override
+#   • On published GitHub Release (pre-release or stable)
+#
+# Secrets required (set in repo Settings → Secrets → Actions):
+#   AURA_FRONTEND_URL   — Deployed frontend base URL for the Android WebView
+#                         (e.g. https://your-space.hf.space or custom domain)
+#
+# Artifacts are uploaded and retained for 14 days.  For production use,
+# replace the debug keystore in the android job with a proper signing config.
+
+name: Build Standalone Artifacts
 
 on:
   push:
     branches:
       - main
-      - master
-
+      - "release/**"
+  release:
+    types: [published]
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Override version tag (e.g. v4.1.0)"
+        required: false
+        default: ""
 
+# ─────────────────────────────────────────────────────────────────────────────
+# SHARED ENVIRONMENT
+# ─────────────────────────────────────────────────────────────────────────────
+env:
+  PYTHON_VERSION: "3.11"
+  APP_NAME: "AuraRAG"
+  DIST_DIR: dist
+
+# ─────────────────────────────────────────────────────────────────────────────
+# JOB 1 — Windows .exe  (PyInstaller on windows-latest)
+# ─────────────────────────────────────────────────────────────────────────────
 jobs:
-  windows-exe:
+  build-windows:
+    name: "Windows — Build .exe"
     runs-on: windows-latest
 
     steps:
-      - name: Checkout
+      # ── 1. Checkout ─────────────────────────────────────────────────────────
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      # ── 2. Python setup ──────────────────────────────────────────────────────
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
 
-      - name: Install dependencies
+      # ── 3. Install CPU-only PyTorch first (avoid multi-GB CUDA download) ────
+      - name: Install CPU-only PyTorch
         run: |
-          python -m pip install --upgrade pip
-          pip install pyinstaller
+          pip install --upgrade pip
+          pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+
+      # ── 4. Install project dependencies ────────────────────────────────────
+      - name: Install project dependencies
+        run: |
           pip install -r requirements.txt
+          pip install pandas openpyxl pyarrow fastparquet
 
-      - name: Build EXE
+      # ── 5. Install PyInstaller ───────────────────────────────────────────────
+      - name: Install PyInstaller
+        run: pip install pyinstaller==6.6.0
+
+      # ── 6. Generate launcher script ─────────────────────────────────────────
+      #     The launcher starts uvicorn (backend) then opens Streamlit (UI).
+      #     Both processes share the same terminal; Ctrl-C shuts them both.
+      - name: Write launcher.py
+        shell: python
         run: |
-          pyinstaller ^
-            --onefile ^
-            --name AuraRAG ^
-            app/ui.py
+          import textwrap, pathlib
+          code = textwrap.dedent("""\
+          \"\"\"
+          AuraRAG Desktop Launcher
+          Starts the FastAPI backend on port 8000 and the Streamlit UI on port 8501.
+          \"\"\"
+          import os
+          import subprocess
+          import sys
+          import time
+          import webbrowser
+          from pathlib import Path
 
-      - name: Upload EXE
+          BASE = Path(sys._MEIPASS) if getattr(sys, 'frozen', False) else Path(__file__).parent
+
+          def main():
+              env = os.environ.copy()
+              env['API_BASE'] = 'http://localhost:8000'
+
+              backend = subprocess.Popen(
+                  [sys.executable, '-m', 'uvicorn', 'app.main:app',
+                   '--host', '0.0.0.0', '--port', '8000', '--workers', '1'],
+                  cwd=str(BASE), env=env,
+              )
+
+              # Give the backend a moment to start
+              time.sleep(3)
+
+              frontend = subprocess.Popen(
+                  [sys.executable, '-m', 'streamlit', 'run', str(BASE / 'app' / 'ui.py'),
+                   '--server.port', '8501', '--server.headless', 'true',
+                   '--browser.gatherUsageStats', 'false'],
+                  cwd=str(BASE), env=env,
+              )
+
+              time.sleep(2)
+              webbrowser.open('http://localhost:8501')
+
+              try:
+                  frontend.wait()
+              finally:
+                  backend.terminate()
+
+          if __name__ == '__main__':
+              main()
+          """)
+          pathlib.Path('launcher.py').write_text(code)
+
+      # ── 7. Collect Streamlit static assets ─────────────────────────────────
+      - name: Locate Streamlit package dir
+        id: streamlit_dir
+        shell: python
+        run: |
+          import streamlit, pathlib, os
+          p = pathlib.Path(streamlit.__file__).parent
+          print(f"STREAMLIT_DIR={p}")
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as fh:
+              fh.write(f"path={p}\n")
+
+      # ── 8. PyInstaller — one-file bundle ────────────────────────────────────
+      - name: Build with PyInstaller
+        run: |
+          pyinstaller `
+            --onefile `
+            --name "${{ env.APP_NAME }}" `
+            --icon assets/icon.ico `
+            --add-data "app;app" `
+            --add-data "${{ steps.streamlit_dir.outputs.path }};streamlit" `
+            --hidden-import streamlit `
+            --hidden-import uvicorn `
+            --hidden-import fastapi `
+            --hidden-import chromadb `
+            --hidden-import sentence_transformers `
+            --hidden-import langchain `
+            --hidden-import langgraph `
+            --collect-data streamlit `
+            --collect-data chromadb `
+            --noconfirm `
+            launcher.py
+        shell: pwsh
+
+      # ── 9. Rename artifact ───────────────────────────────────────────────────
+      - name: Rename .exe
+        run: |
+          $ver = '${{ github.event.inputs.version }}' -ne '' ? '${{ github.event.inputs.version }}' : '${{ github.ref_name }}'
+          Rename-Item -Path "dist\${{ env.APP_NAME }}.exe" -NewName "${{ env.APP_NAME }}-$ver-windows-x64.exe"
+        shell: pwsh
+
+      # ── 10. Upload artifact ──────────────────────────────────────────────────
+      - name: Upload Windows .exe
         uses: actions/upload-artifact@v4
         with:
-          name: AuraRAG-Windows
+          name: aurarag-windows-exe
           path: dist/*.exe
+          retention-days: 14
 
-  android-apk:
+      # ── 11. Attach to GitHub Release (if triggered by release event) ─────────
+      - name: Attach .exe to GitHub Release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.exe
+
+# ─────────────────────────────────────────────────────────────────────────────
+# JOB 2 — Android .apk  (Capacitor WebView wrapper on ubuntu-latest)
+# ─────────────────────────────────────────────────────────────────────────────
+  build-android:
+    name: "Android — Build .apk (WebView wrapper)"
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      # ── 1. Checkout ─────────────────────────────────────────────────────────
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      # ── 2. Java (required by Gradle / Android SDK) ──────────────────────────
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
         with:
-          python-version: "3.11"
+          distribution: temurin
+          java-version: "17"
 
-      - name: Install system dependencies
+      # ── 3. Node.js (required by Capacitor CLI) ──────────────────────────────
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+
+      # ── 4. Android SDK ───────────────────────────────────────────────────────
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android build tools
         run: |
-          sudo apt update
-
-          sudo apt install -y \
-            zip \
-            unzip \
-            openjdk-17-jdk \
-            autoconf \
-            libtool \
-            pkg-config \
-            zlib1g-dev \
-            libncurses5-dev \
-            libncursesw5-dev \
-            cmake \
-            libffi-dev \
-            libssl-dev \
-            wget
-
-      - name: Install Android command line tools
-        run: |
-          mkdir -p $HOME/android-sdk/cmdline-tools
-
-          cd $HOME/android-sdk/cmdline-tools
-
-          wget https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
-
-          unzip commandlinetools-linux-11076708_latest.zip
-
-          mv cmdline-tools latest
-
-          echo "ANDROID_HOME=$HOME/android-sdk" >> $GITHUB_ENV
-          echo "ANDROID_SDK_ROOT=$HOME/android-sdk" >> $GITHUB_ENV
-
-          echo "$HOME/android-sdk/cmdline-tools/latest/bin" >> $GITHUB_PATH
-          echo "$HOME/android-sdk/platform-tools" >> $GITHUB_PATH
-
-      - name: Install Python dependencies
-        run: |
-          python -m pip install --upgrade pip
-
-          pip install cython
-          pip install buildozer
-
-      - name: Accept Android SDK licenses
-        run: |
-          mkdir -p $HOME/.android
-
-          touch $HOME/.android/repositories.cfg
-
-          yes | sdkmanager --licenses || true
-
-      - name: Install Android SDK packages
-        run: |
-          sdkmanager \
+          sdkmanager --install \
             "platform-tools" \
             "platforms;android-34" \
-            "build-tools;34.0.0"
+            "build-tools;34.0.0" \
+            "ndk;25.2.9519653"
 
-      - name: Build APK
+      # ── 5. Scaffold Capacitor project (if mobile/ not yet committed) ─────────
+      - name: Create Capacitor project scaffold (if absent)
         run: |
-          buildozer android debug
+          if [ ! -f "mobile/package.json" ]; then
+            mkdir -p mobile
+            cd mobile
+            npm init -y
+            npm install @capacitor/core @capacitor/cli @capacitor/android
+            npx cap init "${{ env.APP_NAME }}" "com.aurarag.app" \
+              --web-dir www --npm-client npm
+            mkdir -p www
+            cat > www/index.html << 'HTMLEOF'
+          <!DOCTYPE html>
+          <html>
+            <head>
+              <meta charset="utf-8"/>
+              <meta name="viewport" content="width=device-width,initial-scale=1"/>
+              <title>AuraRAG</title>
+              <style>
+                html,body,iframe{margin:0;padding:0;width:100%;height:100%;border:none;overflow:hidden}
+              </style>
+            </head>
+            <body>
+              <iframe src="${{ secrets.AURA_FRONTEND_URL || 'https://your-space.hf.space' }}"
+                      allowfullscreen></iframe>
+            </body>
+          </html>
+          HTMLEOF
+          fi
 
-      - name: Upload APK
+      # ── 6. Stamp version into capacitor.config.json ─────────────────────────
+      - name: Stamp version
+        working-directory: mobile
+        run: |
+          VERSION="${{ github.event.inputs.version || github.ref_name }}"
+          VERSION="${VERSION#v}"   # strip leading 'v'
+          node -e "
+          const fs = require('fs');
+          const f = 'capacitor.config.json';
+          if (!fs.existsSync(f)) process.exit(0);
+          const cfg = JSON.parse(fs.readFileSync(f));
+          cfg.appName = '${{ env.APP_NAME }}';
+          cfg.server  = cfg.server || {};
+          cfg.server.url = '${{ secrets.AURA_FRONTEND_URL }}';
+          cfg.server.cleartext = true;
+          fs.writeFileSync(f, JSON.stringify(cfg, null, 2));
+          console.log('capacitor.config.json updated.');
+          "
+
+      # ── 7. npm install ───────────────────────────────────────────────────────
+      - name: npm install
+        working-directory: mobile
+        run: npm ci --prefer-offline || npm install
+
+      # ── 8. Sync Capacitor → Android ──────────────────────────────────────────
+      - name: Capacitor add + sync Android
+        working-directory: mobile
+        run: |
+          if [ ! -d "android" ]; then
+            npx cap add android
+          fi
+          npx cap sync android
+
+      # ── 9. Gradle wrapper permissions ────────────────────────────────────────
+      - name: Make gradlew executable
+        working-directory: mobile/android
+        run: chmod +x gradlew
+
+      # ── 10. Build debug APK ──────────────────────────────────────────────────
+      - name: Build debug .apk
+        working-directory: mobile/android
+        env:
+          ANDROID_HOME: ${{ env.ANDROID_HOME }}
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
+
+      # ── 11. Locate and rename APK ────────────────────────────────────────────
+      - name: Rename APK
+        run: |
+          VER="${{ github.event.inputs.version || github.ref_name }}"
+          SRC=$(find mobile/android -name "*.apk" -type f | head -1)
+          DEST="dist/${{ env.APP_NAME }}-${VER}-android-debug.apk"
+          mkdir -p dist
+          cp "$SRC" "$DEST"
+          echo "APK: $DEST"
+
+      # ── 12. Upload artifact ──────────────────────────────────────────────────
+      - name: Upload Android .apk
         uses: actions/upload-artifact@v4
         with:
-          name: AuraRAG-APK
-          path: bin/*.apk
+          name: aurarag-android-apk
+          path: dist/*.apk
+          retention-days: 14
+
+      # ── 13. Attach to GitHub Release ─────────────────────────────────────────
+      - name: Attach .apk to GitHub Release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.apk
+
+# ─────────────────────────────────────────────────────────────────────────────
+# JOB 3 — Summary notification
+# ─────────────────────────────────────────────────────────────────────────────
+  notify:
+    name: "Build Summary"
+    runs-on: ubuntu-latest
+    needs: [build-windows, build-android]
+    if: always()
+
+    steps:
+      - name: Print build status
+        run: |
+          echo "================================================"
+          echo "  AuraRAG Artifact Build Summary"
+          echo "================================================"
+          echo "  Windows .exe : ${{ needs.build-windows.result }}"
+          echo "  Android .apk : ${{ needs.build-android.result }}"
+          echo "  Triggered by : ${{ github.event_name }}"
+          echo "  Ref          : ${{ github.ref_name }}"
+          echo "  Commit       : ${{ github.sha }}"
+          echo "================================================"
