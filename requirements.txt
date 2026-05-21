@@ -1,17 +1,15 @@
-# requirements.txt — AuraRAG v4.0
+# requirements.txt — AuraRAG v3.4
 #
-# Changes v4.0:
-#   Added pandas>=2.0.0            — dataframe ingestion (CSV, JSON, XLSX, Parquet)
-#   Added openpyxl>=3.1.0          — pandas XLSX engine
-#   Added pyarrow>=14.0.0          — pandas Parquet engine
-#   Added fastparquet>=2023.10.1   — fallback Parquet engine
+# Changes v3.4:
+#   Added langgraph>=0.2.0          — core dependency for the agentic pipeline.
+#   Added langgraph-checkpoint>=1.0.0 — required for StateGraph compilation.
 #
-# Retained from v3.4:
+# Retained from v3.3 / v3.2.0:
+#   BUG-W fix: python-magic for TextLoader autodetect_encoding.
 #   CPU-only torch installed first in Dockerfile via the PyTorch index URL.
-#   langgraph + langgraph-checkpoint for the agentic pipeline.
-#   All provider LangChain integrations.
+#   NO 'langchain-classic' — it does not exist on PyPI.
 
-# ── LangGraph — agentic pipeline ─────────────────────────────────────────────
+# ── LangGraph — agentic pipeline (v3.4) ──────────────────────────────────────
 langgraph>=0.2.0
 langgraph-checkpoint>=1.0.0
 
@@ -20,6 +18,7 @@ langchain>=0.2.0
 langchain-core>=0.2.0
 langchain-community>=0.2.0
 langchain-text-splitters>=0.2.0
+# NOTE: 'langchain-classic' does NOT exist on PyPI — do not add it.
 langchain-openai>=0.1.0
 langchain-anthropic>=0.1.0
 langchain-google-genai>=1.0.0
@@ -29,22 +28,18 @@ langchain-ollama>=0.1.0
 chromadb>=0.5.0
 
 # ── Embeddings + re-ranking ───────────────────────────────────────────────────
-# CPU-only torch must be installed FIRST in Dockerfile via PyTorch index URL.
+# CPU-only torch should be installed first in the Dockerfile via the PyTorch
+# index URL to avoid pulling the GPU variant (several GB).
 sentence-transformers>=3.0.0
 
 # ── BM25 ──────────────────────────────────────────────────────────────────────
 rank-bm25>=0.2.2
 
-# ── Document loaders — core formats ──────────────────────────────────────────
+# ── Document loaders ──────────────────────────────────────────────────────────
 pypdf>=4.0.0
 unstructured>=0.14.0
-python-magic>=0.4.27        # TextLoader autodetect_encoding (BUG-W fix)
-
-# ── Dataset / structured file support (v4.0) ─────────────────────────────────
-pandas>=2.0.0               # CSV, JSON, XLSX, Parquet dataframe ingestion
-openpyxl>=3.1.0             # pandas XLSX read engine
-pyarrow>=14.0.0             # pandas Parquet read engine (preferred)
-fastparquet>=2023.10.1      # Parquet fallback engine
+# BUG-W fix: autodetect_encoding in TextLoader requires python-magic
+python-magic>=0.4.27
 
 # ── API ───────────────────────────────────────────────────────────────────────
 fastapi>=0.111.0
@@ -65,3 +60,9 @@ python-dotenv>=1.0.0
 
 # ── Session persistence (optional — activate via REDIS_URL env var) ───────────
 redis>=5.0.0
+
+# ── Structured ingestion / UI rendering ──────────────────────────────────────
+pandas>=2.2.0
+openpyxl>=3.1.0
+pyarrow>=16.0.0
+mistune>=3.0.0

@@ -15,8 +15,10 @@ PROVIDER_MODELS: Dict[str, List[str]] = {
         "gpt-4o-mini",
     ],
     "Anthropic": [
-        "claude-3-5-sonnet",
-        "claude-3-haiku",
+        "claude-opus-4-5",
+        "claude-sonnet-4-5",
+        "claude-3-5-sonnet-20241022",
+        "claude-3-5-haiku-20241022",
     ],
     "Google Gemini": [
         "gemini-1.5-flash",
@@ -34,11 +36,13 @@ PROVIDER_MODELS: Dict[str, List[str]] = {
 
 # Human-readable aliases only where the raw model IDs are noisy.
 MODEL_LABELS: Dict[str, str] = {
-    "claude-3-5-sonnet": "claude-3.5-sonnet",
-    "claude-3-haiku": "claude-3-haiku",
-    "gemini-2.5-flash": "gemini-2.5-flash",
-    "gemini-2.5-pro": "gemini-2.5-pro",
-    "gpt-4o-mini": "gpt-4o-mini",
+    "claude-opus-4-5": "Claude Opus 4.5",
+    "claude-sonnet-4-5": "Claude Sonnet 4.5",
+    "claude-3-5-sonnet-20241022": "Claude 3.5 Sonnet",
+    "claude-3-5-haiku-20241022": "Claude 3.5 Haiku",
+    "gemini-2.5-flash": "Gemini 2.5 Flash",
+    "gemini-2.5-pro": "Gemini 2.5 Pro",
+    "gpt-4o-mini": "GPT-4o mini",
 }
 
 KEY_PREFIXES: Dict[str, str] = {

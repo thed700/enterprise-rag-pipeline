@@ -1410,22 +1410,32 @@ class RAGEngine:
         try:
             # stream_mode=["messages", "updates"] gives us both token events
             # from the LLM and node completion events for state capture.
-            async for chunk in self._graph.astream(
+            # BUG-AI fix: use the locally-retrieved `graph` (which respects
+            # top_k changes via _get_or_rebuild_graph) instead of self._graph.
+            async for chunk in graph.astream(
                 initial_state,
                 stream_mode=["messages", "updates"],
             ):
-                chunk_type = chunk.get("type") if isinstance(chunk, dict) else None
+                # BUG-AJ fix: when stream_mode is a list, LangGraph yields
+                # tuples of (mode_str, data) — NOT dicts with a "type" key.
+                # The old code called chunk.get("type") on a tuple, which
+                # always returned None and silently skipped every event.
+                if not isinstance(chunk, tuple) or len(chunk) != 2:
+                    continue
+                chunk_type, chunk_data = chunk
 
-                # Capture the final state from an "updates" chunk at the last node.
+                # Capture the final state from "updates" events.
                 if chunk_type == "updates":
-                    node_updates = chunk.get("data", {})
-                    if isinstance(node_updates, dict):
-                        # Merge into final_state — last write wins
-                        final_state = {**(final_state or {}), **node_updates}  # type: ignore[misc]
+                    if isinstance(chunk_data, dict):
+                        # Each "updates" payload is {node_name: node_output_dict}.
+                        # Merge all node outputs into final_state — last write wins.
+                        for node_output in chunk_data.values():
+                            if isinstance(node_output, dict):
+                                final_state = {**(final_state or {}), **node_output}  # type: ignore[misc]
 
                 # Stream tokens from the Generate node's LLM call.
-                if chunk_type == "messages":
-                    message, metadata = chunk["data"]
+                elif chunk_type == "messages":
+                    message, metadata = chunk_data
                     if metadata.get("langgraph_node") != "generate":
                         continue
                     token = getattr(message, "content", "")
