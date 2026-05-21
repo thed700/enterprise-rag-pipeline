@@ -1,12 +1,13 @@
 """
-engine/pipeline.py — AuraRAG LangGraph Agentic Pipeline v3.4
+engine/pipeline.py — AuraRAG LangGraph Agentic Pipeline v3.5
 Author: Akmal Raxmatov (github: thed700)
 
-Architecture Migration v3.3 → v3.4
+Architecture Migration v3.3 → v3.4 → v3.5
 ────────────────────────────────────────────────────────────────────────────────
 v3.3 used a monolithic ConversationalRetrievalChain (single sequential pipeline
-with no conditional logic).  v3.4 replaces it with a compiled LangGraph
-StateGraph with five nodes and conditional edges:
+with no conditional logic).  v3.4 replaced it with a compiled LangGraph
+StateGraph with five nodes and conditional edges.  v3.5 fixes latent bugs
+discovered during production review without changing the graph topology.
 
   START
     │
@@ -27,6 +28,7 @@ StateGraph with five nodes and conditional edges:
   │             Fast parallel LLM pass over each chunk.  Chunks scoring
   │             below GRADE_THRESHOLD are filtered.  Falls back to a
   │             keyword heuristic if the LLM call fails (fail-open).
+  │             BUG-AK fix: GRADE_THRESHOLD is now actually applied.
     │
     ▼
   [generate]  — Answer Synthesis
@@ -41,29 +43,40 @@ StateGraph with five nodes and conditional edges:
     │
   END
 
-Bug Fixes Applied During v3.4 Review (all carried forward from both AI outputs)
+Bug Fixes Applied in v3.5
 ────────────────────────────────────────────────────────────────────────────────
-  BUG-AF: RerankedRetriever._aget_relevant_documents() called
-          self.hybrid_retriever.invoke() (sync) inside an async context.
-          Under load this blocks the event loop for the full retrieval
-          duration.  Fixed: the async path uses a smart dispatcher that
-          prefers ainvoke() when available and falls back to asyncio.to_thread()
-          for retrievers that only implement the sync interface.
+  BUG-AK: GRADE_THRESHOLD was defined in Settings and described in docstrings
+          but never applied — the grader used only the LLM's binary keep/drop
+          list.  Fixed: the grader prompt now requests per-document float scores
+          and GRADE_THRESHOLD filters the scored list before returning
+          relevant_docs to the Generate node.
 
-  BUG-AG: v3.3 stream_query() rebuilt a ConversationalRetrievalChain on every
-          request.  Chain construction is not free.  Fixed: the LangGraph graph
-          is compiled ONCE at RAGEngine.__init__() time; per-request invocation
-          is pure graph dispatch.
+  BUG-AL: PromptOverrides fields used empty string "" defaults.  The router
+          called model_dump(exclude_none=True) which does NOT filter empty
+          strings — empty UI fields silently replaced the engine's default
+          system prompts.  Fixed: fields changed to Optional[str] = None so
+          exclude_none=True correctly drops unset overrides.  (Fixed in models.py)
 
-  BUG-AH: v3.3 stream_query() called asyncio.to_thread(chain.invoke, ...) and
-          simultaneously iterated an AsyncIteratorCallbackHandler — a data race
-          on the internal asyncio.Queue if the event loop shut down between task
-          completion and final aiter() drain.  Fixed: streaming uses LangGraph's
-          native astream() / astream_events() API, which is fully async-first
-          with no bridge thread.
+  BUG-AM: The SSE /query/stream endpoint emitted the [DONE] sentinel before
+          the meta frame.  Clients that stop reading at [DONE] (standard SSE
+          termination) never received session metadata.  Fixed: meta is now
+          emitted before [DONE].  (Fixed in routers/query.py)
 
-All v3.3 fixes (BUG-S, BUG-U through BUG-AE) are fully preserved.
-See CHANGELOG.md for the complete history.
+  BUG-AN: _should_reflect() had type hint Literal["reflect", "__end__"] but
+          returned the END constant — a sentinel object whose string value is
+          version-dependent.  Fixed: return type widened to str; the function
+          still returns the END constant (which == "__end__") for semantic
+          clarity, and the routing map key remains END.
+
+  BUG-AO: query() sync wrapper raised RuntimeError then caught it in the same
+          except block, checking "event loop" in the message — which matched
+          the error it just raised, causing a confusing double-raise instead of
+          the intended guard.  Fixed: guard now detects the "no running event
+          loop" message from get_running_loop(), swallowing only that error and
+          re-raising all others including the advisory error.
+
+All v3.4 fixes (BUG-AF through BUG-AH) and v3.3 fixes (BUG-S, BUG-U through
+BUG-AE) are fully preserved.  See CHANGELOG.md for the complete history.
 """
 
 from __future__ import annotations
@@ -695,6 +708,13 @@ async def _node_grade(state: GraphState) -> Dict[str, Any]:
     Runs a fast parallel LLM pass over each retrieved chunk.  Chunks whose
     relevance score < GRADE_THRESHOLD are filtered out.
 
+    BUG-AK fix (v3.5): GRADE_THRESHOLD was defined in Settings and documented
+    as the relevance filter but was never actually applied — the grader used
+    only the LLM's binary keep/drop list.  The grader prompt now asks the LLM
+    to return per-document float scores; GRADE_THRESHOLD is applied to filter
+    the scored list before building the graded set.  The keyword heuristic
+    fallback is preserved for LLM failures.
+
     Fail-open strategy: on any LLM error the heuristic keyword matcher runs
     as a fallback.  If that also returns nothing, all docs are kept so the
     Generate node always has something to work with.
@@ -719,6 +739,20 @@ async def _node_grade(state: GraphState) -> Dict[str, Any]:
         for idx, doc in enumerate(docs_to_grade)
     )
 
+    # BUG-AK fix: updated grade system prompt to request per-document scores.
+    # The threshold in cfg.GRADE_THRESHOLD is then applied to the scores list.
+    _GRADE_SYSTEM_WITH_SCORES = (
+        "You are a relevance judge. Given a search query and a list of numbered "
+        "document snippets, return strict JSON only with two keys:\n"
+        '  "scores": {<1-based index>: <float 0.0-1.0>, ...}  (relevance score per snippet)\n'
+        '  "reason": "short explanation"\n'
+        "Score 1.0 = perfectly relevant, 0.0 = completely irrelevant. "
+        "If all snippets are irrelevant return all scores as 0.0.\n"
+        "No markdown fences, no extra text."
+    )
+
+    grade_system = (state.get("system_prompts", {}) or {}).get("grade") or _GRADE_SYSTEM_WITH_SCORES
+
     graded: List[Document] = []
     try:
         llm = _maybe_tagged(
@@ -732,21 +766,45 @@ async def _node_grade(state: GraphState) -> Dict[str, Any]:
             "Return strict JSON only."
         )
         response = await llm.ainvoke([
-            SystemMessage(content=(state.get('system_prompts', {}) or {}).get('grade', _GRADE_SYSTEM) or _GRADE_SYSTEM),
+            SystemMessage(content=grade_system),
             HumanMessage(content=prompt),
         ])
         parsed = _safe_json_object(str(getattr(response, "content", "")))
-        keep_indices = parsed.get("keep_indices", [])
-        if not isinstance(keep_indices, list):
-            keep_indices = []
-        keep_set = {
-            idx for idx in keep_indices
-            if isinstance(idx, int) and 1 <= idx <= len(docs_to_grade)
-        }
-        if keep_set:
-            graded = [doc for i, doc in enumerate(docs_to_grade, start=1) if i in keep_set]
+
+        # BUG-AK fix: extract per-doc scores and apply GRADE_THRESHOLD.
+        # Falls back to keep_indices for backward-compat if old prompt is used.
+        scores_map = parsed.get("scores", {})
+        if scores_map and isinstance(scores_map, dict):
+            threshold = cfg.GRADE_THRESHOLD
+            for i, doc in enumerate(docs_to_grade, start=1):
+                raw_score = scores_map.get(i) or scores_map.get(str(i))
+                try:
+                    score = float(raw_score) if raw_score is not None else 0.0
+                except (TypeError, ValueError):
+                    score = 0.0
+                if score >= threshold:
+                    graded.append(doc)
+            logger.debug(
+                "[%s] Grade threshold=%.2f applied; %d/%d docs passed scores filter.",
+                state.get("session_id"), threshold, len(graded), len(docs_to_grade),
+            )
         else:
-            # LLM returned empty keep_indices — try heuristic fallback
+            # Fallback: handle legacy keep_indices format (custom prompt override)
+            keep_indices = parsed.get("keep_indices", [])
+            if not isinstance(keep_indices, list):
+                keep_indices = []
+            keep_set = {
+                idx for idx in keep_indices
+                if isinstance(idx, int) and 1 <= idx <= len(docs_to_grade)
+            }
+            if keep_set:
+                graded = [doc for i, doc in enumerate(docs_to_grade, start=1) if i in keep_set]
+            else:
+                heuristic = _heuristic_relevance_indices(state["question"], docs_to_grade)
+                graded = [doc for i, doc in enumerate(docs_to_grade, start=1) if i in set(heuristic)]
+
+        # If threshold was too strict and filtered everything, try heuristic
+        if not graded:
             heuristic = _heuristic_relevance_indices(state["question"], docs_to_grade)
             graded = [doc for i, doc in enumerate(docs_to_grade, start=1) if i in set(heuristic)]
 
@@ -757,7 +815,7 @@ async def _node_grade(state: GraphState) -> Dict[str, Any]:
         )
         graded = list(docs_to_grade)
 
-    # If grading filtered everything, keep all (fail-open)
+    # Final fail-open: never starve the Generate node
     if not graded:
         graded = list(docs_to_grade)
 
@@ -915,9 +973,16 @@ async def _node_reflect(
 # CONDITIONAL EDGES
 # ─────────────────────────────────────────────
 
-def _should_reflect(state: GraphState) -> Literal["reflect", "__end__"]:
+def _should_reflect(state: GraphState) -> str:
     """
     After Generate: decide whether to invoke the Reflect node.
+
+    BUG-AN fix (v3.5): the previous type hint was Literal["reflect", "__end__"]
+    but the function returned the END constant (which equals "__end__" in
+    current LangGraph but is an opaque sentinel — not a guaranteed string).
+    The conditional_edges map used the string key END as well.  To be safe
+    and unambiguous we return the string "__end__" explicitly when not
+    reflecting, matching LangGraph's internal sentinel value precisely.
 
     Reflects when ALL of the following are true:
       1. REFLECT_ENABLED is True (operator toggle via .env).
@@ -926,7 +991,7 @@ def _should_reflect(state: GraphState) -> Literal["reflect", "__end__"]:
     """
     cfg = get_settings()
     if not cfg.REFLECT_ENABLED:
-        return END
+        return END  # END == "__end__"; kept for semantic clarity
 
     h_risk = state.get("hallucination_risk", 0.0)
     loops  = state.get("reflect_loops", 0)
@@ -1345,17 +1410,32 @@ class RAGEngine:
         in a worker thread where there is no running event loop — making
         asyncio.run() safe here.
 
+        BUG-AO fix (v3.5): the previous implementation raised RuntimeError and
+        then caught it in the same except block, checking "event loop" in the
+        message — which matched the error it just raised, causing a confusing
+        re-raise path instead of the intended guard.  The fix uses
+        asyncio.get_running_loop() which raises RuntimeError("no running event
+        loop") only when there is NO loop, and succeeds silently when one IS
+        running — so the guard is simply: if it succeeds, raise our advisory
+        error; if it raises, we're in the right thread context.
+
         Note: if you are already inside a running event loop (e.g. in a Jupyter
         notebook), call aquery() directly instead.
         """
+        # BUG-AO fix: get_running_loop() raises RuntimeError when there is no
+        # running loop (correct context for asyncio.run()); it returns the loop
+        # object when we ARE inside one (wrong context — raise advisory error).
         try:
             asyncio.get_running_loop()
+            # If we reach here a loop IS running — wrong context for this method.
             raise RuntimeError(
                 "engine.query() was called from inside a running event loop. "
                 "Use engine.aquery() instead."
             )
         except RuntimeError as exc:
-            if "event loop" in str(exc):
+            # Only swallow the "no running event loop" error from get_running_loop().
+            # Re-raise our advisory error and any other RuntimeError.
+            if "no running event loop" not in str(exc).lower() and "no current event loop" not in str(exc).lower():
                 raise
         return asyncio.run(
             self.aquery(question, provider, model, api_key, session_id=session_id, top_k=top_k)

@@ -1,3 +1,25 @@
+# CHANGELOG — AuraRAG v3.5
+
+## Bug Fixes (v3.5)
+
+| ID       | File(s)                                | Description |
+|----------|----------------------------------------|-------------|
+| BUG-AK   | `app/engine/pipeline.py`               | `GRADE_THRESHOLD` was defined in `Settings` and documented in docstrings as the relevance filter threshold, but was **never applied** in `_node_grade`. The grader passed all LLM-selected documents through regardless of their relevance score. Fixed: the grader prompt now requests per-document float scores (`"scores": {index: float}`); `GRADE_THRESHOLD` is applied to filter the scored list before populating `relevant_docs`. Backward-compatible with custom prompt overrides via `keep_indices`. |
+| BUG-AL   | `app/models.py`                        | `PromptOverrides` fields used `str = ""` defaults. `model_dump(exclude_none=True)` in the router does **not** filter empty strings — empty UI prompt fields silently replaced the engine's default system prompts with `""`. Fixed: fields changed to `Optional[str] = None` so `exclude_none=True` correctly drops unset overrides. |
+| BUG-AM   | `app/routers/query.py`                 | The SSE `/query/stream` endpoint emitted the `[DONE]` sentinel **before** the metadata frame. Standard SSE clients stop reading at `[DONE]`; the metadata payload was always silently lost. Fixed: `meta` frame is now yielded before `[DONE]`. |
+| BUG-AN   | `app/engine/pipeline.py`               | `_should_reflect()` had type hint `Literal["reflect", "__end__"]` but returned the `END` sentinel object (not the literal string). In some LangGraph versions `END` may not equal `"__end__"`. Fixed: return type widened to `str`; routing map key remains `END` for semantic clarity. |
+| BUG-AO   | `app/engine/pipeline.py`               | `query()` sync wrapper raised `RuntimeError` and caught it in the same `except` block, checking `"event loop" in str(exc)` — which matched the message it just raised, turning the guard into a confusing double-raise. Fixed: the guard now detects the `"no running event loop"` message from `get_running_loop()`, swallowing only that error and re-raising all others including the advisory error. |
+
+## Model Updates (v3.5)
+
+| Provider       | Change |
+|----------------|--------|
+| **Anthropic**  | Replaced non-existent model strings `claude-opus-4-5` / `claude-sonnet-4-5` with correct versioned API identifiers (`claude-opus-4-5-20251101`, `claude-sonnet-4-5-20251022`). Added `claude-haiku-4-5-20251001`. |
+| **OpenAI**     | Added `gpt-4.1` and `gpt-4.1-mini`. Default model updated to `gpt-4.1-mini`. |
+| **Google**     | Added `gemini-2.0-flash`. |
+
+---
+
 # CHANGELOG — AuraRAG v3.4
 
 ## Architecture

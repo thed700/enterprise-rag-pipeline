@@ -1,4 +1,7 @@
-# requirements.txt — AuraRAG v3.4
+# requirements.txt — AuraRAG v3.5
+#
+# Changes v3.5:
+#   No new dependencies. All bug fixes (BUG-AK through BUG-AO) are code-only.
 #
 # Changes v3.4:
 #   Added langgraph>=0.2.0          — core dependency for the agentic pipeline.
@@ -9,7 +12,7 @@
 #   CPU-only torch installed first in Dockerfile via the PyTorch index URL.
 #   NO 'langchain-classic' — it does not exist on PyPI.
 
-# ── LangGraph — agentic pipeline (v3.4) ──────────────────────────────────────
+# ── LangGraph — agentic pipeline (v3.4+) ─────────────────────────────────────
 langgraph>=0.2.0
 langgraph-checkpoint>=1.0.0
 

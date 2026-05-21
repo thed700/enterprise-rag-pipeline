@@ -104,17 +104,21 @@ async def query_stream(
             logger.exception("[%s] Stream error", body.session_id)
             yield f"data: {json.dumps({'error': str(exc)})}\n\n"
         finally:
-            yield "data: [DONE]\n\n"
+            # BUG-AM fix (v3.5): the meta frame was emitted AFTER the [DONE]
+            # sentinel.  Clients that stop reading at [DONE] (which is the
+            # standard SSE termination signal) never received the metadata.
+            # Fix: emit meta first, then [DONE] so compliant clients see both.
             meta = json.dumps({
                 "meta": {
-                    "session_id": body.session_id,
+                    "session_id":  body.session_id,
                     "token_count": token_count,
-                    "provider": body.provider,
-                    "model": body.model,
-                    "top_k": body.top_k,
+                    "provider":    body.provider,
+                    "model":       body.model,
+                    "top_k":       body.top_k,
                 }
             })
             yield f"data: {meta}\n\n"
+            yield "data: [DONE]\n\n"
 
     return StreamingResponse(
         event_generator(),

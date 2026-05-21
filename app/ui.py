@@ -1,5 +1,5 @@
 """
-ui.py — AuraRAG v3.4 — Redesigned UI
+ui.py — AuraRAG v3.5 — Redesigned UI
 """
 
 from __future__ import annotations

@@ -1,20 +1,15 @@
 """
-utils.py — AuraRAG v3.4
+utils.py — AuraRAG v3.5
 Author: Akmal Raxmatov (github: thed700)
 
-Changes v3.4:
-  - APP_VERSION bumped to "3.4".
-  - GRADE_THRESHOLD: float (default 0.5) — relevance score below which a
-    document chunk is filtered by the Document Grader node.
-  - REFLECT_ENABLED: bool (default True) — toggle the Reflect/Self-Correction
-    node via .env without code changes.
-  - MAX_REFLECT_LOOPS: int (default 1) — maximum reflection loops before
-    forcing a final answer; guards against infinite correction cycles.
-  - REWRITE_MAX_TOKENS: int (default 128) — max_tokens budget for the
-    lightweight Query Rewrite LLM call.
-  - GRADE_MAX_TOKENS: int (default 64) — max_tokens budget for each Document
-    Grader LLM call (called in parallel, so keep small).
+Changes v3.5:
+  - APP_VERSION bumped to "3.5".
+  - Bug fixes BUG-AK through BUG-AO (see CHANGELOG.md).
+  - Default OPENAI_MODEL updated to gpt-4.1-mini.
 
+Retained from v3.4:
+  GRADE_THRESHOLD, REFLECT_ENABLED, MAX_REFLECT_LOOPS,
+  REWRITE_MAX_TOKENS, GRADE_MAX_TOKENS.
 Retained from v3.3 / v3.2.0:
   BUG-Q:  setup_logging() reads LOG_LEVEL from Settings (not always INFO).
   BUG-AC: lru_cache on get_settings() — Settings are immutable after process
@@ -28,13 +23,13 @@ from functools import lru_cache
 
 from pydantic_settings import BaseSettings
 
-APP_VERSION = "3.4"
+APP_VERSION = "3.5"
 
 
 class Settings(BaseSettings):
     # ── LLM provider keys (optional — users supply keys live in the UI) ─────
     OPENAI_API_KEY:    str = ""
-    OPENAI_MODEL:      str = "gpt-4o-mini"
+    OPENAI_MODEL:      str = "gpt-4.1-mini"
     ANTHROPIC_API_KEY: str = ""
     GOOGLE_API_KEY:    str = ""
 

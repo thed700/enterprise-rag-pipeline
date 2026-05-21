@@ -1,6 +1,6 @@
 ---
 title: AuraRAG — Enterprise RAG Pipeline
-emoji: 🚀
+emoji: ◈
 colorFrom: blue
 colorTo: indigo
 sdk: docker
@@ -9,90 +9,64 @@ pinned: false
 license: mit
 ---
 
-# ◈ AuraRAG — Advanced Unified Retrieval Architecture
+# ◈ AuraRAG
 
-**v3.4** · Agentic Enterprise RAG Pipeline (LangGraph)
+**Advanced Unified Retrieval Architecture · v3.5**  
+Author: Akmal Raxmatov · [github.com/thed700](https://github.com/thed700)
 
-Author: Akmal Raxmatov · [GitHub: thed700](https://github.com/thed700)
-
----
-
-## What's New in v3.4
-
-| ID | Change / Fix | Severity / Type |
-| --- | --- | --- |
-| **LANGGRAPH-CORE** | **Agentic Pipeline Transition**: Completely replaced the rigid `ConversationalRetrievalChain` with a flexible, stateful LangGraph workflow encompassing 5 multi-step agentic nodes: **Rewrite ➔ Retrieve ➔ Grade ➔ Generate ➔ Reflect**. | 🚀 Feature |
-| **FEAT-OBS** | **Advanced Production Observability**: Upgraded `QueryResponse` and Server-Sent Events (SSE) payloads to deliver a detailed `pipeline_trace`, accurate tracking of `graded_chunks`, and total `reflect_loops`. Streaming sessions now append a structured JSON meta-event containing token tallies, provider metrics, and configuration footprints right after the `[DONE]` signal. | 🚀 Feature |
-| **BUG-AF** | Native asynchronous execution path added to `RerankedRetriever`. It now preferentially targets `ainvoke()` with an optimized fallback to `asyncio.to_thread()` for synchronous base retrievers, completely resolving async event loop context blocks. | 🔴 High |
-| **BUG-GRADER** | Implemented a fail-open execution guard within the Document Grader node. If an LLM parsing error occurs or if structural evaluation drops all assets, the pipeline smoothly cascades to a heuristic fallback rather than returning empty context or crashing. | 🔴 High |
-| **BUG-STREAM** | Overhauled `stream_query()` to listen across both `messages` and `updates` streaming modes simultaneously inside LangGraph. This ensures that final pipeline state deltas are accurately tracked and saved to the session memory store during a live stream. | 🟡 Medium |
-| **BUG-REFLECT** | Resolved a state-mutation bug inside the Query Reflection loop where iterative adjustment would fail to pass rewritten query state back to the grading phase properly. State dependencies now cleanly reset and populate `retrieved_docs` for subsequent passes. | 🟡 Medium |
-
-See [CHANGELOG.md](CHANGELOG.md) for full history.
+AuraRAG is a production-grade, agentic Retrieval-Augmented Generation platform. It ingests structured and unstructured documents, indexes them in a hybrid vector + keyword store, and answers queries through a self-correcting LangGraph pipeline that rewrites, retrieves, grades, generates, and optionally reflects — all over a streaming SSE API with a dark-mode Streamlit UI.
 
 ---
 
-## Architecture
+## How It Works
+
+Documents flow through a five-node LangGraph `StateGraph`. Each node is async-first and writes to shared state that is threaded end-to-end.
 
 ```
-Upload (PDF / TXT)
-      │
-      ▼
-  File size guard (MAX_UPLOAD_MB) ── 413 if exceeded
-      │
-  Chunked stream-write to temp file (256 KB chunks)
-      │
-  PyPDFLoader / TextLoader (UTF-8 + autodetect)
-      │
-  RecursiveCharacterTextSplitter (configurable chunk_size / overlap)
-      │
-  SHA-256 deduplication ── skip chunks already seen
-  (hashes persisted to bm25.pkl — survives restarts)
-      │
-      ├──► ChromaDB (all-mpnet-base-v2, persistent, incremental add)
-      └──► BM25Retriever (rank-bm25, rebuilt from cumulative corpus)
-                │
-                ▼
-         EnsembleRetriever (60 % dense · 40 % BM25)
-                │
-                ▼
-         RerankedRetriever (Handles unified sync/async rerank execution)
-                │
-                ▼
-   ┌────────────────────────────────────────────────────────────────────────┐
-   │                     LANGGRAPH AGENTIC WORKFLOW                         │
-   │                                                                        │
-   │                        ┌─── [Start] ───┐                               │
-   │                        │               │                               │
-   │                        ▼               ▼                               │
-   │                [Node: Rewrite] ──► [Node: Retrieve]                    │
-   │                                             │                          │
-   │                                             ▼                          │
-   │                                      [Node: Grade]                     │
-   │                                             │                          │
-   │                                             ▼                          │
-   │                                     [Node: Generate]                   │
-   │                                             │                          │
-   │                                             ▼                          │
-   │                                   ⚖️ [Should Reflect?]                 │
-   │                                      /             \                   │
-   │                          Yes (Loop Limit Not Met)   No / Max Reached   │
-   │                                    /                 \                 │
-   │                                   ▼                   ▼                │
-   │                           [Node: Reflect]         [End Loop]           │
-   │                                                                        │
-   └────────────────────────────────────────────────────────────────────────┘
-                                        │
-         ┌──────────────────────────────┴──────────────────────────────┐
-         │                                                             │
-    /query                                                      /query/stream
-    (Synchronous execution via                                  (Server-Sent Events via
-     asynchronous state capture)                                 astream_events + final metrics)
-         │                                                             │
-         └──────────────────────────────┬──────────────────────────────┘
-                                        ▼
-                      OpenAI / Anthropic / Gemini / Ollama
+User question
+     │
+     ▼
+[Rewrite] ── optimises the raw question into a keyword-dense search query
+     │         using session history and (on retry loops) prior feedback
+     ▼
+[Retrieve] ── hybrid search: 60% ChromaDB MMR dense + 40% BM25 sparse
+     │          → cross-encoder re-ranking → top-k candidates
+     ▼
+[Grade] ──── LLM scores each chunk 0.0–1.0 against the query;
+     │        chunks below GRADE_THRESHOLD are dropped
+     │        fallback: keyword-overlap heuristic if LLM fails
+     ▼
+[Generate] ── grounded answer synthesis over graded context + history
+     │          appends a hidden hallucination_risk self-score (0.0–1.0)
+     ▼
+[Reflect?] ── if risk > 0.7 and loop budget remains:
+     │          generate a refined query → re-retrieve → re-grade → re-generate
+     └──────── otherwise → END
+```
 
+The graph is compiled **once at startup** and reused across all requests. Streaming uses LangGraph's native `astream()` — no bridge threads, no async queue races.
+
+---
+
+## Ingestion Pipeline
+
+```
+Upload (PDF / TXT / CSV / JSON / XLSX / Parquet)
+        │
+        ▼
+  File size guard (MAX_UPLOAD_MB)
+        │
+  Chunked stream-write to temp file (256 KB chunks)
+        │
+  Loader (PyPDF / TextLoader / pandas)
+        │
+  RecursiveCharacterTextSplitter (CHUNK_SIZE / CHUNK_OVERLAP)
+        │
+  SHA-256 deduplication ── duplicate chunks skipped,
+  hashes persisted to bm25.pkl so restarts don't reprocess
+        │
+        ├──► ChromaDB (all-mpnet-base-v2, persistent, incremental)
+        └──► BM25Retriever (rank-bm25, rebuilt from cumulative corpus)
 ```
 
 ---
@@ -104,104 +78,161 @@ Upload (PDF / TXT)
 ```bash
 git clone https://github.com/thed700/aurarag.git
 cd aurarag
+
 python -m venv .venv && source .venv/bin/activate
 
-# CPU-only torch (saves ~1.5 GB vs CUDA build)
+# Install CPU-only PyTorch first to avoid pulling the multi-GB CUDA build
 pip install torch --extra-index-url https://download.pytorch.org/whl/cpu
 
 pip install -r requirements.txt
 
 cp .env.example .env
-# Add provider API keys to your .env file
+# Edit .env — add your provider API key(s)
 
-# Terminal 1: backend api engine
+# Terminal 1 — backend
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
 
-# Terminal 2: frontend UI
+# Terminal 2 — UI
 streamlit run app/ui.py
-
 ```
 
-Open **http://localhost:8501**
+Open **http://localhost:8501** for the UI or **http://localhost:8000/docs** for the interactive API explorer.
 
 ### Docker Compose
 
 ```bash
 cp .env.example .env
 docker compose up --build
-
 ```
-
-* API Docs & Interactive Swagger: http://localhost:8000/docs
-* Streamlit User Interface: http://localhost:8501
 
 ---
 
 ## API Reference
 
 | Method | Path | Rate limit | Description |
-| --- | --- | --- | --- |
-| `GET` | `/health` | — | Engine health, system version, active session count, total `bm25_docs` |
-| `GET` | `/providers` | — | Global provider-to-model registry mapping |
-| `POST` | `/ingest` | 10/min | Multipart file upload and indexing engine (PDF/TXT) |
-| `POST` | `/query` | 30/min | Synchronous RAG execution (Returns full agent trace and telemetry) |
-| `POST` | `/query/stream` | 30/min | Real-time token stream (SSE) concluding with structural trace metadata |
-| `DELETE` | `/memory/{session_id}` | — | Instantly flushes historical memory for a specific single session |
-| `DELETE` | `/memory` | — | Complete system-wide clearing of all active session stores (Admin) |
+|--------|------|-----------|-------------|
+| `GET` | `/health` | — | Engine status, version, indexed doc count, active session count |
+| `GET` | `/providers` | — | Provider → model registry |
+| `POST` | `/ingest` | 10 / min | Upload and index files (PDF, TXT, CSV, JSON, XLSX, Parquet) |
+| `POST` | `/query` | 30 / min | Full agentic RAG query, returns complete response with trace |
+| `POST` | `/query/stream` | 30 / min | Same pipeline, token-by-token SSE stream |
+| `DELETE` | `/memory/{session_id}` | — | Clear one session's conversation history |
+| `DELETE` | `/memory` | — | Clear all session memory |
 
-### Query request fields
+### Query request
 
 ```jsonc
+POST /query
 {
-  "question":   "What does the policy say about overtime?",
-  "top_k":      5,               // 1–20, defines bounds for retrievers & rerankers
+  "question":   "What does the policy say about remote work?",
+  "top_k":      5,              // chunks returned to the generate node (1–20)
   "provider":   "Anthropic",
-  "model":      "claude-sonnet-4-6",
+  "model":      "claude-sonnet-4-5-20251022",
   "api_key":    "sk-ant-...",
-  "session_id": "user-abc-123"   // Include to leverage persistent stateful graphs
+  "session_id": "user-abc-123", // omit for stateless one-shot queries
+  "system_prompts": {           // optional — override any node's system prompt
+    "rewrite":  "...",
+    "grade":    "...",
+    "generate": "...",
+    "reflect":  "..."
+  }
 }
-
 ```
 
-### Query response fields (v3.4 Observability)
+### Query response
 
 ```jsonc
 {
   "answer": "According to Section 4...",
   "sources": [
-    { "source": "handbook.pdf", "content": "..." }
+    { "content": "...excerpt...", "metadata": { "source": "handbook.pdf", "page": 12 } }
   ],
-  "pipeline_trace": ["rewrite", "retrieve", "grade", "generate"], // Order of executed nodes
-  "graded_chunks": {
-    "total_retrieved": 5,
-    "accepted_chunks": 3
-  },
-  "reflect_loops": 0
+  "chat_history":   ["Human: ...", "Assistant: ..."],
+  "session_id":     "user-abc-123",
+  "pipeline_trace": ["rewrite", "retrieve", "grade", "generate"],
+  "graded_chunks":  3,
+  "reflect_loops":  0
 }
+```
+
+### Streaming
+
+`POST /query/stream` returns a `text/event-stream`. Events arrive in this order:
 
 ```
+data: {"token": "According"}
+data: {"token": " to"}
+...
+data: {"meta": {"session_id": "...", "token_count": 142, "provider": "...", "model": "...", "top_k": 5}}
+data: [DONE]
+```
+
+---
+
+## Supported Providers & Models
+
+| Provider | Models |
+|----------|--------|
+| **OpenAI** | `gpt-4.1`, `gpt-4.1-mini`, `gpt-4o`, `gpt-4o-mini` |
+| **Anthropic** | `claude-opus-4-5-20251101`, `claude-sonnet-4-5-20251022`, `claude-3-5-sonnet-20241022`, `claude-haiku-4-5-20251001`, `claude-3-5-haiku-20241022` |
+| **Google Gemini** | `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-2.0-flash`, `gemini-1.5-pro`, `gemini-1.5-flash` |
+| **Ollama (local)** | `llama3`, `mistral`, or any model string your Ollama instance serves |
+
+Keys are supplied per-request through the UI or API — nothing is stored server-side.
 
 ---
 
 ## Configuration
 
-All system configurations and agentic parameters are derived dynamically via environment variables or loaded through `.env`.
+All settings are read from environment variables or a `.env` file. The `Settings` object is cached after first load; call `get_settings.cache_clear()` in tests that need to vary values.
 
 | Variable | Default | Description |
-| --- | --- | --- |
-| `CHROMA_PERSIST_DIR` | `./data/chroma_db` | Storage path directory for vector records |
-| `CHROMA_COLLECTION` | `aurarag` | Target collection name inside ChromaDB |
-| `CHUNK_SIZE` | `512` | Token character ceiling for structural chunks |
-| `CHUNK_OVERLAP` | `64` | Token context overlap buffer between sequential chunks |
-| `SESSION_TTL_MINUTES` | `60` | Lifespan before an inactive stateful session is flushed |
-| `ALLOWED_ORIGINS` | `http://localhost:8501,...` | CORS validation whitelist configuration |
-| `MAX_UPLOAD_MB` | `50` | File upload ceiling limits enforced on `/ingest` |
-| `RATE_LIMIT_QUERY` | `30/minute` | Rate-limiting constraints applied per IP to queries |
-| `RATE_LIMIT_INGEST` | `10/minute` | Rate-limiting constraints applied per IP to file ingestion |
-| `LOG_LEVEL` | `INFO` | Level settings (`DEBUG` / `INFO` / `WARNING` / `ERROR`) |
-| `SOURCE_SNIPPET_LEN` | `300` | Hard character limit for returned context payloads |
-| `GRADE_MAX_TOKENS` | `128` | Max output token limit for structured evaluation extraction |
-| `MAX_REFLECT_LOOPS` | `2` | Global threshold governing maximum self-correction iteration runs |
+|----------|---------|-------------|
+| `CHROMA_PERSIST_DIR` | `./data/chroma_db` | ChromaDB storage path. Falls back to a temp directory if not writable. |
+| `CHROMA_COLLECTION` | `aurarag` | ChromaDB collection name |
+| `CHUNK_SIZE` | `512` | Characters per text chunk |
+| `CHUNK_OVERLAP` | `64` | Overlap between consecutive chunks |
+| `SESSION_TTL_MINUTES` | `60` | Idle session eviction timeout |
+| `MAX_UPLOAD_MB` | `50` | Per-file upload size cap (0 = unlimited) |
+| `ALLOWED_ORIGINS` | `http://localhost:8501,...` | CORS allowed origins (comma-separated) |
+| `RATE_LIMIT_QUERY` | `30/minute` | Per-IP query rate limit |
+| `RATE_LIMIT_INGEST` | `10/minute` | Per-IP ingest rate limit |
+| `LOG_LEVEL` | `INFO` | `DEBUG` / `INFO` / `WARNING` / `ERROR` |
+| `SOURCE_SNIPPET_LEN` | `300` | Max characters per source chunk in responses |
+| `GRADE_THRESHOLD` | `0.5` | Minimum relevance score (0.0–1.0) for a chunk to pass the Grade node |
+| `REFLECT_ENABLED` | `true` | Enable / disable the Reflect self-correction node |
+| `MAX_REFLECT_LOOPS` | `1` | Maximum reflect → retrieve → grade → generate iterations |
+| `REWRITE_MAX_TOKENS` | `128` | Token budget for the Query Rewrite node |
+| `GRADE_MAX_TOKENS` | `64` | Token budget for each Document Grade call |
+
+---
+
+## Project Structure
+
+```
+aurarag/
+├── app/
+│   ├── main.py               # FastAPI app, lifespan, /ingest, /health, /providers
+│   ├── models.py             # Pydantic request/response schemas
+│   ├── utils.py              # Settings (pydantic-settings), logging setup
+│   ├── constants.py          # Re-exports from app.backend.models (compat shim)
+│   ├── ui.py                 # Streamlit dark-mode chat UI
+│   ├── engine/
+│   │   ├── __init__.py       # Public re-exports for backward compat
+│   │   └── pipeline.py       # LangGraph graph, all nodes, RAGEngine class
+│   ├── backend/
+│   │   ├── models.py         # Provider/model registry, key validation
+│   │   └── ingest.py         # File loaders (PDF, TXT, CSV, JSON, XLSX, Parquet)
+│   └── routers/
+│       └── query.py          # /query and /query/stream endpoints
+├── tests/
+│   └── test_engine.py
+├── data/                     # ChromaDB persistence + BM25 pickle
+├── docker-compose.yml
+├── Dockerfile
+├── requirements.txt
+└── .env.example
+```
 
 ---
 
@@ -209,28 +240,28 @@ All system configurations and agentic parameters are derived dynamically via env
 
 ```bash
 pytest tests/ -v
-
 ```
 
-The validation suite aggressively asserts performance against all regression definitions across components—spanning `RerankedRetriever` async contexts, structured JSON parser dropguards, LangGraph stream execution handlers, multi-turn memory transformations, and validation schemas.
+The test suite covers `RerankedRetriever` async paths, `_safe_json_object` parser edge cases, LangGraph stream event handling, multi-turn session memory, and Pydantic schema validation.
 
 ---
 
 ## Roadmap
 
-| Version | Status | Theme |
-| --- | --- | --- |
-| v3.0 | ✅ Shipped | Multi-provider Bring-Your-Own-Key (BYOK), Hybrid search foundation |
-| v3.1 | ✅ Shipped | Stateful session isolation, native SSE, global route rate-limiting mechanics |
-| v3.2 | ✅ Shipped | Parameter routing reliability, streaming stability updates, deduplication persistence |
-| v3.3 | ✅ Shipped | Reranker execution alignment, OS resource leak resolutions, runtime env corrections |
-| **v3.4** | ✅ **Shipped** | **Agentic Pipeline Evolution: State-driven LangGraph architectures, grading safeguards, and deep instrumentation traces** |
-| v3.5 | 🗓 Planned | Graph-RAG (Entity-relation mapping using knowledge extraction pipelines) |
-| v3.6 | 🗓 Planned | Vision-RAG (Multimodal token extraction, chart analysis, and image descriptions) |
-| v3.7 | 🗓 Planned | Secure Multi-tenancy (Namespaced vector isolation, tenant routers, and JWT validation) |
+| Version | Status | Focus |
+|---------|--------|-------|
+| v3.0 | ✅ Shipped | Multi-provider BYOK, hybrid search |
+| v3.1 | ✅ Shipped | Stateful sessions, SSE streaming, rate limiting |
+| v3.2 | ✅ Shipped | Parameter routing, streaming stability, deduplication persistence |
+| v3.3 | ✅ Shipped | Reranker wiring, resource leak fixes, runtime config corrections |
+| v3.4 | ✅ Shipped | LangGraph agentic pipeline, document grading, observability traces |
+| **v3.5** | ✅ **Shipped** | **Bug fixes: GRADE_THRESHOLD enforcement, PromptOverrides empty-string override, SSE meta ordering, sync wrapper guard, correct model API strings** |
+| v3.6 | 🗓 Planned | Graph-RAG — entity/relation extraction, knowledge graph traversal |
+| v3.7 | 🗓 Planned | Vision-RAG — multimodal ingestion, chart and image understanding |
+| v3.8 | 🗓 Planned | Multi-tenancy — namespaced vector isolation, JWT auth, tenant routing |
 
 ---
 
 ## License
 
-Distributed under the MIT License. See `LICENSE` for more information.
+MIT — see [LICENSE](LICENSE).
