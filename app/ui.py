@@ -39,39 +39,39 @@ SUPPORTED_UPLOAD_TYPES = ["pdf", "txt", "csv", "json", "xlsx", "xls", "parquet"]
 # ---------------------------------------------------------------------------
 STYLES = """
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500;600&family=Google+Sans+Mono&display=swap');
-@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Nunito+Sans:ital,opsz,wght@0,6..12,300;0,6..12,400;0,6..12,500;0,6..12,600;1,6..12,300&family=Fira+Code:wght@400;500&display=swap');
 
 :root {
-  --bg:        #0d0f14;
-  --surface:   #13151c;
-  --surface2:  #181b24;
-  --surface3:  #1e2130;
+  --bg:        #0c0d11;
+  --surface:   #13151e;
+  --surface2:  #191c27;
+  --surface3:  #20243380;
   --surface4:  #252939;
-  --border:    rgba(255,255,255,.065);
-  --border2:   rgba(255,255,255,.11);
-  --border3:   rgba(255,255,255,.16);
-  --text:      #e8ecf5;
-  --text2:     #b0b8d0;
-  --muted:     #636b82;
-  --accent:    #7c9eff;
-  --accent2:   #a87cff;
-  --accent3:   #5ce8c0;
-  --grad:      linear-gradient(135deg, #7c9eff 0%, #a87cff 100%);
-  --grad2:     linear-gradient(135deg, #5ce8c0 0%, #7c9eff 100%);
-  --good:      #3dd68c;
+  --border:    rgba(255,255,255,.07);
+  --border2:   rgba(255,255,255,.12);
+  --border3:   rgba(255,255,255,.18);
+  --text:      #e6eaf4;
+  --text2:     #a8b0c8;
+  --muted:     #5a6278;
+  --accent:    #6e9fff;
+  --accent2:   #a47cff;
+  --accent3:   #4ddec8;
+  --grad:      linear-gradient(135deg, #6e9fff 0%, #a47cff 100%);
+  --grad2:     linear-gradient(135deg, #4ddec8 0%, #6e9fff 100%);
+  --good:      #34d48a;
   --warn:      #f5a524;
-  --bad:       #ff6b6b;
+  --bad:       #ff6060;
   --r-xs:      8px;
   --r-sm:      12px;
   --r-md:      16px;
   --r-lg:      22px;
   --r-xl:      28px;
+  --r-2xl:     36px;
   --r-pill:    999px;
-  --shadow:    0 4px 24px rgba(0,0,0,.5);
-  --shadow2:   0 8px 40px rgba(0,0,0,.6);
-  --font:      'Outfit', system-ui, sans-serif;
-  --mono:      'JetBrains Mono', monospace;
+  --shadow:    0 4px 24px rgba(0,0,0,.55);
+  --shadow2:   0 8px 40px rgba(0,0,0,.65);
+  --font:      'Nunito Sans', system-ui, sans-serif;
+  --mono:      'Fira Code', monospace;
 }
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -231,13 +231,13 @@ html, body, [class*="css"] {
 }
 
 /* ─── GEMINI-STYLE CHAT INPUT ─────────────────────────────────────────── */
-/* Outer fixed bottom strip */
+/* Bottom strip */
 [data-testid="stBottom"] {
-  background: transparent !important;
-  padding: 0 0 12px !important;
+  background: linear-gradient(to top, var(--bg) 60%, transparent) !important;
+  padding: 0 0 20px !important;
 }
 
-/* The pill-shaped container wrapping textarea + button */
+/* Outer pill wrapper */
 [data-testid="stChatInput"] {
   background: transparent !important;
   border: none !important;
@@ -246,78 +246,70 @@ html, body, [class*="css"] {
 [data-testid="stChatInput"] > div {
   background: var(--surface) !important;
   border: 1.5px solid var(--border3) !important;
-  border-radius: 28px !important;
-  box-shadow:
-    0 2px 16px rgba(0,0,0,.35),
-    0 0 0 0 rgba(124,158,255,0) !important;
-  transition: border-color .22s ease, box-shadow .22s ease !important;
-  padding: 6px 10px 6px 20px !important;
-  min-height: 56px !important;
-  align-items: center !important;
+  border-radius: var(--r-2xl) !important;
+  box-shadow: 0 2px 20px rgba(0,0,0,.4), 0 0 0 0 rgba(110,159,255,0) !important;
+  transition: border-color .2s ease, box-shadow .2s ease !important;
+  padding: 8px 8px 8px 22px !important;
+  min-height: 60px !important;
   display: flex !important;
+  align-items: center !important;
+  gap: 10px !important;
 }
 [data-testid="stChatInput"] > div:focus-within {
-  border-color: rgba(124,158,255,.55) !important;
-  box-shadow:
-    0 2px 16px rgba(0,0,0,.35),
-    0 0 0 4px rgba(124,158,255,.09) !important;
+  border-color: rgba(110,159,255,.5) !important;
+  box-shadow: 0 2px 20px rgba(0,0,0,.4), 0 0 0 4px rgba(110,159,255,.10) !important;
 }
 
-/* Textarea inside */
+/* Textarea */
 [data-testid="stChatInput"] textarea {
   font-family: var(--font) !important;
-  font-size: .97rem !important;
+  font-size: 1rem !important;
   font-weight: 400 !important;
   color: var(--text) !important;
   background: transparent !important;
   border: none !important;
   box-shadow: none !important;
   outline: none !important;
-  padding: 8px 0 !important;
+  padding: 6px 0 !important;
   min-height: 40px !important;
-  max-height: 200px !important;
+  max-height: 180px !important;
   resize: none !important;
-  line-height: 1.6 !important;
-  letter-spacing: .005em !important;
+  line-height: 1.55 !important;
+  letter-spacing: .01em !important;
 }
 [data-testid="stChatInput"] textarea::placeholder {
   color: var(--muted) !important;
-  font-size: .93rem !important;
-  font-weight: 400 !important;
+  font-size: .94rem !important;
+  font-weight: 300 !important;
 }
 
-/* Send button — Gemini-style gradient circle */
+/* Send button — glowing gradient circle */
 [data-testid="stChatInput"] button {
   background: var(--grad) !important;
   border: none !important;
   border-radius: 50% !important;
-  width: 40px !important;
-  height: 40px !important;
-  min-width: 40px !important;
-  min-height: 40px !important;
-  margin: 0 2px 0 10px !important;
+  width: 42px !important;
+  height: 42px !important;
+  min-width: 42px !important;
+  min-height: 42px !important;
+  margin: 0 2px 0 0 !important;
   padding: 0 !important;
   display: flex !important;
   align-items: center !important;
   justify-content: center !important;
   cursor: pointer !important;
-  box-shadow: 0 2px 10px rgba(124,158,255,.4) !important;
-  transition: transform .15s, box-shadow .15s, opacity .15s !important;
+  box-shadow: 0 2px 12px rgba(110,159,255,.45) !important;
+  transition: transform .15s cubic-bezier(.34,1.56,.64,1), box-shadow .15s !important;
   flex-shrink: 0 !important;
 }
 [data-testid="stChatInput"] button:hover {
-  transform: scale(1.06) !important;
-  box-shadow: 0 4px 18px rgba(124,158,255,.55) !important;
+  transform: scale(1.08) !important;
+  box-shadow: 0 4px 20px rgba(110,159,255,.6) !important;
 }
-[data-testid="stChatInput"] button:active {
-  transform: scale(0.96) !important;
-}
+[data-testid="stChatInput"] button:active { transform: scale(0.94) !important; }
 [data-testid="stChatInput"] button svg {
-  color: #fff !important;
-  stroke: #fff !important;
-  fill: #fff !important;
-  width: 18px !important;
-  height: 18px !important;
+  color: #fff !important; stroke: #fff !important;
+  fill: #fff !important; width: 18px !important; height: 18px !important;
 }
 
 /* ─── CHAT MESSAGES ───────────────────────────────────────────────────── */
@@ -326,31 +318,35 @@ html, body, [class*="css"] {
   border: none !important;
   border-radius: 0 !important;
   padding: 2px 0 !important;
-  margin-bottom: 6px !important;
+  margin-bottom: 8px !important;
 }
 
-/* user message bubble */
-[data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]) {
-  background: transparent !important;
-}
-[data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]) > div > div > div {
-  background: var(--surface2) !important;
-  border: 1px solid var(--border) !important;
-  border-radius: var(--r-lg) !important;
-  padding: 10px 16px !important;
+/* Both bubbles: the inner content div gets styled */
+[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"],
+[data-testid="stChatMessage"] .stMarkdown {
   font-size: .95rem !important;
+  line-height: 1.65 !important;
 }
 
-/* assistant message */
-[data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-assistant"]) {
-  background: transparent !important;
+/* User message — right-aligned pill style */
+[data-testid="stChatMessage"]:nth-child(odd) > div > div:last-child {
+  background: var(--surface2) !important;
+  border: 1px solid var(--border2) !important;
+  border-radius: var(--r-xl) var(--r-xl) var(--r-sm) var(--r-xl) !important;
+  padding: 11px 18px !important;
+  max-width: 88% !important;
 }
 
-/* avatar override */
+/* Assistant avatar ring */
 [data-testid="chatAvatarIcon-assistant"] {
   background: var(--grad) !important;
   border-radius: 50% !important;
-  box-shadow: 0 2px 10px rgba(124,158,255,.35) !important;
+  box-shadow: 0 2px 10px rgba(110,159,255,.35) !important;
+}
+[data-testid="chatAvatarIcon-user"] {
+  background: var(--surface3) !important;
+  border: 1px solid var(--border2) !important;
+  border-radius: 50% !important;
 }
 
 /* ─── MAIN AREA HEADER ────────────────────────────────────────────────── */
@@ -789,20 +785,34 @@ def _render_source_cards(sources: List[Dict[str, Any]]) -> None:
 def _render_history(session_id: str) -> None:
     history = st.session_state.sessions.get(session_id, [])
     if not history:
-        # Gemini-style empty / greeting state
+        # Gemini-style empty / greeting state — personalised greeting
+        provider = st.session_state.get("provider", "")
+        model    = st.session_state.get("model", "")
+        badge = ""
+        if model:
+            badge = (
+                f'<span style="display:inline-flex;align-items:center;gap:5px;'
+                f'padding:4px 12px;border-radius:999px;border:1px solid var(--border2);'
+                f'background:var(--surface);font-size:.75rem;color:var(--text2);'
+                f'margin-top:10px;font-weight:500;">'
+                f'<span style="width:6px;height:6px;border-radius:50%;'
+                f'background:var(--grad);display:inline-block;flex-shrink:0;"></span>'
+                f'{html.escape(model)}</span>'
+            )
         st.markdown(
             '<div class="empty-wrap">'
             '<div class="empty-logo">◈</div>'
             '<div class="empty-greeting">What can I help with?</div>'
             '<div class="empty-sub">'
-            'Upload documents in the sidebar, then ask anything. '
-            'AuraRAG retrieves, grades, and synthesises grounded answers.'
+            'Upload your documents in the sidebar, then ask anything — '
+            'AuraRAG retrieves, grades and synthesises grounded answers.'
             '</div>'
+            + badge +
             '<div class="suggestion-row">'
             '<div class="sg-chip">📄 Summarise a document</div>'
             '<div class="sg-chip">🔍 Find specific information</div>'
-            '<div class="sg-chip">🧠 Compare two topics</div>'
-            '<div class="sg-chip">❓ Ask about data in a table</div>'
+            '<div class="sg-chip">🧠 Compare two sections</div>'
+            '<div class="sg-chip">📊 Ask about data in a table</div>'
             '</div>'
             '</div>',
             unsafe_allow_html=True,
@@ -810,7 +820,7 @@ def _render_history(session_id: str) -> None:
         return
 
     for msg in history:
-        role = msg["role"]
+        role   = msg["role"]
         avatar = "🧑" if role == "user" else "◈"
         with st.chat_message(role, avatar=avatar):
             if role == "assistant":
@@ -845,6 +855,23 @@ def _render_sidebar(providers: Dict[str, List[str]]) -> Dict[str, Any]:
             '</div>',
             unsafe_allow_html=True,
         )
+
+        # ── Active model quick-badge ────────────────────────────────────────
+        cur_model = st.session_state.get("model", "")
+        cur_prov  = st.session_state.get("provider", "")
+        if cur_model:
+            st.markdown(
+                f'<div style="display:flex;align-items:center;gap:7px;'
+                f'padding:7px 12px;border-radius:var(--r-sm);border:1px solid var(--border);'
+                f'background:var(--surface);margin-bottom:4px;">'
+                f'<span style="width:6px;height:6px;border-radius:50%;'
+                f'background:var(--grad);display:inline-block;flex-shrink:0;"></span>'
+                f'<span style="font-size:.78rem;color:var(--text2);flex:1;min-width:0;'
+                f'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'
+                f'{html.escape(cur_prov)} · {html.escape(cur_model)}</span>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
 
         # ── Runtime status ─────────────────────────────────────────────────
         st.markdown('<div class="sb-label">Runtime</div>', unsafe_allow_html=True)
@@ -1125,7 +1152,12 @@ def main() -> None:
 
                     elif kind == "meta":
                         try:
-                            meta = json.loads(value)
+                            parsed_meta = json.loads(value)
+                            meta = parsed_meta
+                            # Bug fix: sources are embedded in the meta SSE
+                            # event; extract them here so source cards render.
+                            if "sources" in parsed_meta:
+                                sources = parsed_meta["sources"]
                         except Exception:
                             meta = {"raw_meta": value}
 
