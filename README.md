@@ -1,6 +1,6 @@
 ---
 title: AuraRAG — Enterprise RAG Pipeline
-emoji: ◈
+emoji: 🤖
 colorFrom: blue
 colorTo: indigo
 sdk: docker
