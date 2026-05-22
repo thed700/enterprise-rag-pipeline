@@ -821,7 +821,7 @@ def _render_history(session_id: str) -> None:
 
     for msg in history:
         role   = msg["role"]
-        avatar = "🧑" if role == "user" else "◈"
+        avatar = "🧑" if role == "user" else "🤖"
         with st.chat_message(role, avatar=avatar):
             if role == "assistant":
                 render_markdown(msg["content"])
@@ -1108,7 +1108,7 @@ def main() -> None:
         },
     }
 
-    with st.chat_message("assistant", avatar="◈"):
+    with st.chat_message("assistant", avatar="🤖"):
         status_ph = st.empty()
         steps_ph  = st.empty()
         answer_ph = st.empty()

@@ -40,7 +40,6 @@ rank-bm25>=0.2.2
 
 # ── Document loaders ──────────────────────────────────────────────────────────
 pypdf>=4.0.0
-unstructured>=0.14.0
 # BUG-W fix: autodetect_encoding in TextLoader requires python-magic
 python-magic>=0.4.27
 

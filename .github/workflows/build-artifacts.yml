@@ -225,7 +225,10 @@ jobs:
           warn_on_root = 1
           SPEC
 
-      - name: Build APK
+      - name: Accept Android SDK licenses
+  run: yes | sdkmanager --licenses || true
+
+- name: Build APK
         run: |
           buildozer -v android debug
 
