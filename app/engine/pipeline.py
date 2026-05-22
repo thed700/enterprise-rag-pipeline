@@ -1526,7 +1526,7 @@ class RAGEngine:
                         )
                     token = str(token)
                     if token:
-                    full_answer += token
+                        full_answer += token
                     cleaned = re.sub(r"<<META>>.*?(<<END_META>>|$)", "", full_answer, flags=re.DOTALL)
                     delta = cleaned[len(re.sub(r"<<META>>.*?(<<END_META>>|$)", "", full_answer[:-len(token)] if len(token) < len(full_answer) else "", flags=re.DOTALL)):]
                     if delta:
