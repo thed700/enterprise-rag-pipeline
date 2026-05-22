@@ -20,7 +20,7 @@ from slowapi.util import get_remote_address
 
 from app.backend.ingest import load_documents_from_file
 from app.constants import PROVIDER_MODELS
-from app.engine import RAGEngine
+from app.engine_core import RAGEngine
 from app.models import HealthResponse, IngestResponse, ProvidersResponse
 from app.routers.query import router as query_router
 from app.utils import APP_VERSION, get_settings, setup_logging
