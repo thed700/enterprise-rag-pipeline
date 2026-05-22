@@ -55,7 +55,7 @@ from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
 
 import chromadb
 
-from langchain_community.chains import ConversationalRetrievalChain # FIX BUG-A
+from langchain.chains import ConversationalRetrievalChain # FIX BUG-A
 from langchain.memory import ConversationBufferWindowMemory         # FIX BUG-K
 from langchain.retrievers.ensemble import EnsembleRetriever         # FIX BUG-B
 from langchain_community.embeddings import HuggingFaceEmbeddings
