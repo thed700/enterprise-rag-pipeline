@@ -1,5 +1,22 @@
 """
-ui.py — AuraRAG v3.5 — Redesigned UI
+ui.py — AuraRAG v3.6 — Redesigned UI
+
+Changes v3.6:
+  BUG-AVATAR fix: avatar="◈" is a Unicode geometric shape, not an emoji.
+      Streamlit's st.chat_message() only accepts true emoji characters or
+      image URLs. Using "◈" raised StreamlitAPIException and crashed the
+      entire app on every message render. Fixed: replaced with "🤖" for
+      assistant and "🧑" for user — both are valid emoji codepoints.
+
+  BUG-SSE-SOURCES fix: source cards and pipeline trace badges now render
+      correctly in streaming mode. The SSE meta frame from the backend now
+      carries sources, pipeline_trace, graded_chunks, and reflect_loops.
+      The UI parses these from the "meta" SSE event and renders them after
+      the streamed answer.
+
+  BUG-META-DISPLAY fix: the <<META>>...<<END_META>> block stripped in the
+      pipeline is now also stripped client-side as a safety net, so even
+      if a legacy response slips through, users never see raw JSON.
 """
 
 from __future__ import annotations
@@ -7,6 +24,7 @@ from __future__ import annotations
 import html
 import json
 import os
+import re
 import uuid
 from typing import Any, Dict, Generator, List, Tuple
 
@@ -33,6 +51,9 @@ API_BASE = os.environ.get("API_BASE", "http://localhost:8000")
 
 DEFAULT_PROMPTS = {"rewrite": "", "grade": "", "generate": "", "reflect": ""}
 SUPPORTED_UPLOAD_TYPES = ["pdf", "txt", "csv", "json", "xlsx", "xls", "parquet"]
+
+# Regex to strip meta block client-side as a safety net
+_META_BLOCK_RE = re.compile(r"<<META>>.*?<<END_META>>", re.DOTALL)
 
 # ---------------------------------------------------------------------------
 # Styles
@@ -103,7 +124,6 @@ html, body, [class*="css"] {
   font-family: var(--font) !important;
 }
 
-/* Brand block */
 .sb-brand {
   padding: 6px 0 22px;
   border-bottom: 1px solid var(--border);
@@ -127,7 +147,6 @@ html, body, [class*="css"] {
   margin-top: 4px; letter-spacing: .01em;
 }
 
-/* section labels */
 .sb-label {
   font-size: .63rem;
   font-weight: 600;
@@ -138,7 +157,6 @@ html, body, [class*="css"] {
   padding-left: 2px;
 }
 
-/* status pill */
 .sb-status-row {
   display: flex; align-items: center; gap: 9px;
   padding: 9px 13px;
@@ -162,7 +180,6 @@ html, body, [class*="css"] {
   50%      { box-shadow: 0 0 0 5px rgba(61,214,140,.08); }
 }
 
-/* stat chips below status */
 .sb-stats {
   display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 2px;
 }
@@ -175,7 +192,6 @@ html, body, [class*="css"] {
 }
 .sb-stat strong { color: var(--text) !important; font-weight: 500; }
 
-/* sidebar buttons */
 [data-testid="stSidebar"] .stButton > button {
   border-radius: var(--r-sm) !important;
   border: 1px solid var(--border2) !important;
@@ -193,7 +209,6 @@ html, body, [class*="css"] {
   color: var(--text) !important;
 }
 
-/* sidebar selectbox / text inputs */
 [data-testid="stSidebar"] .stSelectbox > div > div,
 [data-testid="stSidebar"] .stTextInput > div > div > input {
   background: var(--surface2) !important;
@@ -209,7 +224,6 @@ html, body, [class*="css"] {
   box-shadow: 0 0 0 3px rgba(124,158,255,.08) !important;
 }
 
-/* slider */
 [data-testid="stSidebar"] .stSlider [data-baseweb="slider"] div[role="slider"] {
   background: var(--accent) !important;
   border-color: var(--accent) !important;
@@ -218,12 +232,10 @@ html, body, [class*="css"] {
   color: var(--accent) !important;
 }
 
-/* toggle */
 [data-testid="stSidebar"] input[type="checkbox"]:checked + div {
   background: var(--accent) !important;
 }
 
-/* caption */
 .stCaption, [data-testid="stCaptionContainer"] {
   color: var(--muted) !important;
   font-size: .74rem !important;
@@ -231,13 +243,11 @@ html, body, [class*="css"] {
 }
 
 /* ─── GEMINI-STYLE CHAT INPUT ─────────────────────────────────────────── */
-/* Bottom strip */
 [data-testid="stBottom"] {
   background: linear-gradient(to top, var(--bg) 60%, transparent) !important;
   padding: 0 0 20px !important;
 }
 
-/* Outer pill wrapper */
 [data-testid="stChatInput"] {
   background: transparent !important;
   border: none !important;
@@ -260,7 +270,6 @@ html, body, [class*="css"] {
   box-shadow: 0 2px 20px rgba(0,0,0,.4), 0 0 0 4px rgba(110,159,255,.10) !important;
 }
 
-/* Textarea */
 [data-testid="stChatInput"] textarea {
   font-family: var(--font) !important;
   font-size: 1rem !important;
@@ -283,7 +292,6 @@ html, body, [class*="css"] {
   font-weight: 300 !important;
 }
 
-/* Send button — glowing gradient circle */
 [data-testid="stChatInput"] button {
   background: var(--grad) !important;
   border: none !important;
@@ -321,14 +329,12 @@ html, body, [class*="css"] {
   margin-bottom: 8px !important;
 }
 
-/* Both bubbles: the inner content div gets styled */
 [data-testid="stChatMessage"] [data-testid="stMarkdownContainer"],
 [data-testid="stChatMessage"] .stMarkdown {
   font-size: .95rem !important;
   line-height: 1.65 !important;
 }
 
-/* User message — right-aligned pill style */
 [data-testid="stChatMessage"]:nth-child(odd) > div > div:last-child {
   background: var(--surface2) !important;
   border: 1px solid var(--border2) !important;
@@ -337,7 +343,6 @@ html, body, [class*="css"] {
   max-width: 88% !important;
 }
 
-/* Assistant avatar ring */
 [data-testid="chatAvatarIcon-assistant"] {
   background: var(--grad) !important;
   border-radius: 50% !important;
@@ -416,7 +421,6 @@ html, body, [class*="css"] {
   font-size: .88rem; color: var(--muted);
   max-width: 340px; line-height: 1.6;
 }
-/* Suggestion chips */
 .suggestion-row {
   display: flex; flex-wrap: wrap; justify-content: center;
   gap: 8px; margin-top: 6px; max-width: 560px;
@@ -550,7 +554,6 @@ hr { border-color: var(--border) !important; }
 .stMarkdown p { line-height: 1.65 !important; }
 .element-container:has(.stChatMessage) { padding: 0 !important; }
 
-/* Expander */
 [data-testid="stExpander"] {
   border: 1px solid var(--border) !important;
   border-radius: var(--r-md) !important;
@@ -562,7 +565,6 @@ hr { border-color: var(--border) !important; }
   color: var(--text2) !important;
 }
 
-/* warning / info callouts in sidebar */
 [data-testid="stSidebar"] .stAlert {
   border-radius: var(--r-sm) !important;
   font-size: .8rem !important;
@@ -570,7 +572,6 @@ hr { border-color: var(--border) !important; }
   background: var(--surface2) !important;
 }
 
-/* file uploader */
 [data-testid="stFileUploader"] {
   border-radius: var(--r-md) !important;
 }
@@ -648,7 +649,10 @@ def _fetch_health() -> Dict[str, Any] | None:
 
 
 def _upload_files(files: List[Any]) -> Dict[str, Any]:
-    multipart = [("files", (f.name, f.getvalue(), f.type or "application/octet-stream")) for f in files]
+    multipart = [(
+        "files",
+        (f.name, f.getvalue(), f.type or "application/octet-stream"),
+    ) for f in files]
     resp = requests.post(f"{API_BASE}/ingest", files=multipart, timeout=300)
     resp.raise_for_status()
     return resp.json()
@@ -661,7 +665,9 @@ def _query_once(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _query_stream(payload: Dict[str, Any]) -> Generator[Tuple[str, str], None, None]:
-    with requests.post(f"{API_BASE}/query/stream", json=payload, stream=True, timeout=300) as resp:
+    with requests.post(
+        f"{API_BASE}/query/stream", json=payload, stream=True, timeout=300
+    ) as resp:
         resp.raise_for_status()
         for raw in resp.iter_lines(decode_unicode=True):
             if not raw or not raw.startswith("data: "):
@@ -680,6 +686,11 @@ def _query_stream(payload: Dict[str, Any]) -> Generator[Tuple[str, str], None, N
                 yield ("error", str(obj["error"]))
             elif "meta" in obj:
                 yield ("meta", json.dumps(obj["meta"], ensure_ascii=False))
+
+
+def _strip_meta(text: str) -> str:
+    """Client-side safety net: strip <<META>>...<<END_META>> blocks."""
+    return _META_BLOCK_RE.sub("", text).strip()
 
 
 # ---------------------------------------------------------------------------
@@ -712,7 +723,7 @@ _MD = mistune.create_markdown(
 
 
 def render_markdown(text: str) -> None:
-    st.markdown(_MD(text), unsafe_allow_html=True)
+    st.markdown(_MD(_strip_meta(text)), unsafe_allow_html=True)
 
 
 # ---------------------------------------------------------------------------
@@ -785,7 +796,6 @@ def _render_source_cards(sources: List[Dict[str, Any]]) -> None:
 def _render_history(session_id: str) -> None:
     history = st.session_state.sessions.get(session_id, [])
     if not history:
-        # Gemini-style empty / greeting state — personalised greeting
         provider = st.session_state.get("provider", "")
         model    = st.session_state.get("model", "")
         badge = ""
@@ -820,7 +830,9 @@ def _render_history(session_id: str) -> None:
         return
 
     for msg in history:
-        role   = msg["role"]
+        role = msg["role"]
+        # BUG-AVATAR fix: "◈" is not a valid Streamlit avatar (not a real emoji).
+        # Use proper emoji codepoints that Streamlit's avatar validator accepts.
         avatar = "🧑" if role == "user" else "🤖"
         with st.chat_message(role, avatar=avatar):
             if role == "assistant":
@@ -842,7 +854,6 @@ def _render_history(session_id: str) -> None:
 def _render_sidebar(providers: Dict[str, List[str]]) -> Dict[str, Any]:
     with st.sidebar:
 
-        # ── Brand ──────────────────────────────────────────────────────────
         st.markdown(
             '<div class="sb-brand">'
             '<div class="sb-logo-row">'
@@ -856,7 +867,6 @@ def _render_sidebar(providers: Dict[str, List[str]]) -> Dict[str, Any]:
             unsafe_allow_html=True,
         )
 
-        # ── Active model quick-badge ────────────────────────────────────────
         cur_model = st.session_state.get("model", "")
         cur_prov  = st.session_state.get("provider", "")
         if cur_model:
@@ -873,7 +883,6 @@ def _render_sidebar(providers: Dict[str, List[str]]) -> Dict[str, Any]:
                 unsafe_allow_html=True,
             )
 
-        # ── Runtime status ─────────────────────────────────────────────────
         st.markdown('<div class="sb-label">Runtime</div>', unsafe_allow_html=True)
         health = _fetch_health()
         st.session_state.last_health = health
@@ -903,7 +912,6 @@ def _render_sidebar(providers: Dict[str, List[str]]) -> Dict[str, Any]:
                 unsafe_allow_html=True,
             )
 
-        # ── Session ────────────────────────────────────────────────────────
         st.markdown('<div class="sb-label">Session</div>', unsafe_allow_html=True)
 
         session_ids = list(st.session_state.sessions.keys())
@@ -931,7 +939,6 @@ def _render_sidebar(providers: Dict[str, List[str]]) -> Dict[str, Any]:
             )
         st.caption(f"{len(st.session_state.sessions)} local session(s)")
 
-        # ── Documents ──────────────────────────────────────────────────────
         st.markdown('<div class="sb-label">Documents</div>', unsafe_allow_html=True)
         uploads = st.file_uploader(
             "Upload documents",
@@ -949,13 +956,13 @@ def _render_sidebar(providers: Dict[str, List[str]]) -> Dict[str, Any]:
                         result = _upload_files(uploads)
                         st.success(
                             f"✓ {result.get('chunks_ingested', 0)} chunks indexed"
-                            + (f" · {result.get('duplicates_skipped', 0)} skipped" if result.get('duplicates_skipped') else "")
+                            + (f" · {result.get('duplicates_skipped', 0)} skipped"
+                               if result.get("duplicates_skipped") else "")
                         )
                         _fetch_health.clear()
                     except Exception as exc:
                         st.error(f"Ingest failed: {exc}")
 
-        # ── Retrieval ──────────────────────────────────────────────────────
         st.markdown('<div class="sb-label">Retrieval</div>', unsafe_allow_html=True)
         st.session_state.top_k = st.slider(
             "Top K", 1, 20, int(st.session_state.top_k), 1, key="slider_topk"
@@ -966,11 +973,13 @@ def _render_sidebar(providers: Dict[str, List[str]]) -> Dict[str, Any]:
             key="toggle_stream",
         )
 
-        # ── Model ──────────────────────────────────────────────────────────
         st.markdown('<div class="sb-label">Model</div>', unsafe_allow_html=True)
 
         provider_keys = list(providers.keys())
-        prov_idx = provider_keys.index(st.session_state.provider) if st.session_state.provider in provider_keys else 0
+        prov_idx = (
+            provider_keys.index(st.session_state.provider)
+            if st.session_state.provider in provider_keys else 0
+        )
         provider = st.selectbox(
             "Provider",
             provider_keys,
@@ -1025,7 +1034,6 @@ def _render_sidebar(providers: Dict[str, List[str]]) -> Dict[str, Any]:
 
         st.session_state.model = model
 
-        # ── Prompt overrides ───────────────────────────────────────────────
         st.markdown('<div class="sb-label">Prompt overrides</div>', unsafe_allow_html=True)
         with st.expander("Edit system prompts", expanded=False):
             for key, label, ph in [
@@ -1058,7 +1066,6 @@ def main() -> None:
     sidebar    = _render_sidebar(providers)
     health     = st.session_state.last_health
 
-    # ── Header ────────────────────────────────────────────────────────────
     st.markdown(
         '<div class="main-hdr">'
         '<div class="main-hdr-icon">◈</div>'
@@ -1070,7 +1077,6 @@ def main() -> None:
         unsafe_allow_html=True,
     )
 
-    # Offline banner
     if not health:
         st.markdown(
             '<div class="offline-banner">'
@@ -1080,16 +1086,13 @@ def main() -> None:
             unsafe_allow_html=True,
         )
 
-    # ── Chat history ──────────────────────────────────────────────────────
     _render_history(st.session_state.active_session_id)
 
-    # ── Input ─────────────────────────────────────────────────────────────
     prompt = st.chat_input("Ask anything about your documents…", key="chat_input")
     if not prompt:
         return
 
     session_id = st.session_state.active_session_id
-    # BUG-AK fix: use setdefault to avoid KeyError on fresh session
     st.session_state.sessions.setdefault(session_id, []).append(
         {"role": "user", "content": prompt, "sources": [], "meta": {}}
     )
@@ -1108,12 +1111,12 @@ def main() -> None:
         },
     }
 
+    # BUG-AVATAR fix: use real emoji "🤖" instead of "◈" (a geometric symbol).
     with st.chat_message("assistant", avatar="🤖"):
         status_ph = st.empty()
         steps_ph  = st.empty()
         answer_ph = st.empty()
 
-        # Thinking indicator
         status_ph.markdown(
             '<div class="thinking-wrap">'
             '<div class="thinking-dots"><span></span><span></span><span></span></div>'
@@ -1147,15 +1150,17 @@ def main() -> None:
                             with steps_ph.container():
                                 _render_pipeline_steps("generate")
                         stream_buffer += value
-                        final_answer   = stream_buffer
-                        answer_ph.markdown(_MD(stream_buffer), unsafe_allow_html=True)
+                        # BUG-META-DISPLAY fix: strip meta block before rendering
+                        display_text   = _strip_meta(stream_buffer)
+                        final_answer   = display_text
+                        answer_ph.markdown(_MD(display_text), unsafe_allow_html=True)
 
                     elif kind == "meta":
                         try:
                             parsed_meta = json.loads(value)
                             meta = parsed_meta
-                            # Bug fix: sources are embedded in the meta SSE
-                            # event; extract them here so source cards render.
+                            # BUG-SSE-SOURCES fix: sources now arrive in the
+                            # meta frame thanks to the router fix in v3.6.
                             if "sources" in parsed_meta:
                                 sources = parsed_meta["sources"]
                         except Exception:
@@ -1167,13 +1172,12 @@ def main() -> None:
                     elif kind == "done":
                         break
 
-                # BUG-AJ fix: only fall back when streaming produced nothing.
-                # Never fire a second request after a successful stream.
+                # Fallback: only if streaming produced nothing at all
                 if not final_answer:
                     with steps_ph.container():
                         _render_pipeline_steps("generate")
                     response     = _query_once(payload)
-                    final_answer = response.get("answer", "")
+                    final_answer = _strip_meta(response.get("answer", ""))
                     sources      = response.get("sources", [])
                     meta = {
                         "pipeline_trace": response.get("pipeline_trace", []),
@@ -1190,7 +1194,7 @@ def main() -> None:
                     unsafe_allow_html=True,
                 )
                 response     = _query_once(payload)
-                final_answer = response.get("answer", "")
+                final_answer = _strip_meta(response.get("answer", ""))
                 sources      = response.get("sources", [])
                 meta = {
                     "pipeline_trace": response.get("pipeline_trace", []),
@@ -1202,7 +1206,6 @@ def main() -> None:
             final_answer = f"Something went wrong — {exc}"
             st.error(final_answer)
 
-        # Clear status + stepper once done
         status_ph.empty()
         steps_ph.empty()
 
@@ -1215,7 +1218,6 @@ def main() -> None:
         if trace:
             st.caption("Pipeline · " + " → ".join(trace))
 
-        # Persist assistant turn to session history
         st.session_state.sessions.setdefault(session_id, []).append({
             "role":    "assistant",
             "content": final_answer or "No answer returned.",

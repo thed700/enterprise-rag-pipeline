@@ -1,12 +1,14 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# Dockerfile — AuraRAG v3.4.0
+# Dockerfile — AuraRAG v3.6
 # Author: Akmal Raxmatov (github: thed700)
 #
-# Changes v3.4.0:
-#   - Migrated setup for Hugging Face Spaces deployment.
-#   - Exposed port 7860 to match Hugging Face default container routing.
-#   - Introduced entrypoint.sh orchestration to run both FastAPI and Streamlit.
-#   - Retained libmagic1 runtime dependencies (BUG-W fix) and multi-stage layout.
+# Changes v3.6:
+#   - Version label bumped to 3.6.
+#   - Removed unstructured from requirements (BUG-UNSTRUCTURED fix) which
+#     eliminates ~2 GB of unnecessary deps (detectron2, tesseract, etc.)
+#     and makes this image significantly faster to build on HF Spaces.
+#   - Added writable tmp mount point for Chroma fallback path used on
+#     read-only HF Spaces container filesystems.
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ── Stage 1: dependency builder ───────────────────────────────────────────────
@@ -26,6 +28,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
+
+# Install CPU-only torch first to avoid pulling the multi-GB GPU variant
 RUN pip install --no-cache-dir \
         torch \
         --extra-index-url https://download.pytorch.org/whl/cpu
@@ -41,11 +45,14 @@ WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app \
-    API_BASE=http://localhost:8000
+    API_BASE=http://localhost:8000 \
+    # Fallback Chroma dir for read-only container filesystems (HF Spaces)
+    AURARAG_CACHE_DIR=/tmp/aurarag
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libgomp1 \
         libmagic1 \
+        curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Create a non-root system user for security compliance
@@ -57,10 +64,10 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 # Copy project source code with appropriate ownership
 COPY --chown=appuser:appuser . .
 
-# Initialize data directories and explicitly set user permissions
-RUN mkdir -p /app/data/chroma_db && chown -R appuser:appuser /app/data
+# Initialize data directories and writable tmp cache
+RUN mkdir -p /app/data/chroma_db /tmp/aurarag \
+    && chown -R appuser:appuser /app/data /tmp/aurarag
 
-# ATTENTION: Grant execution permissions for the entrypoint orchestration script
 RUN chmod +x /app/entrypoint.sh && chown appuser:appuser /app/entrypoint.sh
 
 USER appuser
@@ -68,9 +75,8 @@ USER appuser
 # Hugging Face Spaces strictly routes inbound traffic via port 7860
 EXPOSE 7860
 
-LABEL org.opencontainers.image.version="3.4.0" \
+LABEL org.opencontainers.image.version="3.6.0" \
       org.opencontainers.image.title="AuraRAG" \
       org.opencontainers.image.authors="Akmal Raxmatov"
 
-# Execute the custom entrypoint script instead of a single service worker
 CMD ["./entrypoint.sh"]

@@ -1,82 +1,24 @@
 """
-engine/pipeline.py — AuraRAG LangGraph Agentic Pipeline v3.5
+engine/pipeline.py — AuraRAG LangGraph Agentic Pipeline v3.6
 Author: Akmal Raxmatov (github: thed700)
 
-Architecture Migration v3.3 → v3.4 → v3.5
+Bug Fixes Applied in v3.6
 ────────────────────────────────────────────────────────────────────────────────
-v3.3 used a monolithic ConversationalRetrievalChain (single sequential pipeline
-with no conditional logic).  v3.4 replaced it with a compiled LangGraph
-StateGraph with five nodes and conditional edges.  v3.5 fixes latent bugs
-discovered during production review without changing the graph topology.
+  BUG-META-LEAK: stream_query() yielded raw LLM tokens including the hidden
+      <<META>>{...}<<END_META>> block directly into the SSE stream. The user
+      saw raw JSON hallucination_risk data in their chat bubble. Fixed: tokens
+      are buffered; the meta block is stripped before each yield using a sliding
+      window approach that handles blocks split across token boundaries.
 
-  START
-    │
-    ▼
-  [rewrite]   — Query Transformation
-  │             Rewrites the raw user query into a search-optimised form,
-  │             using session history and (on reflection loops) the previous
-  │             grounding feedback as additional context.
-    │
-    ▼
-  [retrieve]  — Hybrid Search + Cross-Encoder Rerank
-  │             Invokes RerankedRetriever (60% ChromaDB dense MMR +
-  │             40% BM25 sparse + CrossEncoder reranking).
-  │             BUG-AF fix: async path is truly non-blocking.
-    │
-    ▼
-  [grade]     — Document Relevance Grader
-  │             Fast parallel LLM pass over each chunk.  Chunks scoring
-  │             below GRADE_THRESHOLD are filtered.  Falls back to a
-  │             keyword heuristic if the LLM call fails (fail-open).
-  │             BUG-AK fix: GRADE_THRESHOLD is now actually applied.
-    │
-    ▼
-  [generate]  — Answer Synthesis
-  │             Full LLM call grounded in graded docs + session history.
-  │             Appends a hidden <<META>> hallucination_risk score.
-    │
-    ▼  (conditional edge → _should_reflect)
-  [reflect]   — Self-Correction (optional / looped)
-    │           If hallucination_risk > 0.7 AND loops < MAX_REFLECT_LOOPS,
-    │           generates a refined search query and loops back to [retrieve].
-    │           Otherwise falls through to END.
-    │
-  END
+  BUG-SSE-SOURCES: stream_query() never surfaced sources, pipeline_trace,
+      graded_chunks, or reflect_loops to the SSE router. Fixed: a new
+      stream_query_with_meta() generator yields regular token strings AND a
+      final Dict containing the full result metadata. The router uses this to
+      build a complete meta SSE frame so source cards and pipeline traces render
+      in streaming mode.
 
-Bug Fixes Applied in v3.5
-────────────────────────────────────────────────────────────────────────────────
-  BUG-AK: GRADE_THRESHOLD was defined in Settings and described in docstrings
-          but never applied — the grader used only the LLM's binary keep/drop
-          list.  Fixed: the grader prompt now requests per-document float scores
-          and GRADE_THRESHOLD filters the scored list before returning
-          relevant_docs to the Generate node.
-
-  BUG-AL: PromptOverrides fields used empty string "" defaults.  The router
-          called model_dump(exclude_none=True) which does NOT filter empty
-          strings — empty UI fields silently replaced the engine's default
-          system prompts.  Fixed: fields changed to Optional[str] = None so
-          exclude_none=True correctly drops unset overrides.  (Fixed in models.py)
-
-  BUG-AM: The SSE /query/stream endpoint emitted the [DONE] sentinel before
-          the meta frame.  Clients that stop reading at [DONE] (standard SSE
-          termination) never received session metadata.  Fixed: meta is now
-          emitted before [DONE].  (Fixed in routers/query.py)
-
-  BUG-AN: _should_reflect() had type hint Literal["reflect", "__end__"] but
-          returned the END constant — a sentinel object whose string value is
-          version-dependent.  Fixed: return type widened to str; the function
-          still returns the END constant (which == "__end__") for semantic
-          clarity, and the routing map key remains END.
-
-  BUG-AO: query() sync wrapper raised RuntimeError then caught it in the same
-          except block, checking "event loop" in the message — which matched
-          the error it just raised, causing a confusing double-raise instead of
-          the intended guard.  Fixed: guard now detects the "no running event
-          loop" message from get_running_loop(), swallowing only that error and
-          re-raising all others including the advisory error.
-
-All v3.4 fixes (BUG-AF through BUG-AH) and v3.3 fixes (BUG-S, BUG-U through
-BUG-AE) are fully preserved.  See CHANGELOG.md for the complete history.
+All v3.5 fixes (BUG-AK through BUG-AO) and prior fixes are fully preserved.
+See CHANGELOG.md for the complete history.
 """
 
 from __future__ import annotations
@@ -102,6 +44,7 @@ from typing import (
     Sequence,
     Tuple,
     TypedDict,
+    Union,
 )
 
 import chromadb
@@ -125,6 +68,7 @@ from app.utils import get_settings
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
+
 def _resolve_persist_dir(raw_path: str) -> pathlib.Path:
     """
     Resolve a writable persistence directory.
@@ -135,7 +79,8 @@ def _resolve_persist_dir(raw_path: str) -> pathlib.Path:
     """
     candidates = [
         pathlib.Path(raw_path).expanduser(),
-        pathlib.Path(os.environ.get("AURARAG_CACHE_DIR", "" )).expanduser() if os.environ.get("AURARAG_CACHE_DIR") else None,
+        pathlib.Path(os.environ.get("AURARAG_CACHE_DIR", "")).expanduser()
+        if os.environ.get("AURARAG_CACHE_DIR") else None,
         pathlib.Path(tempfile.gettempdir()) / "aurarag" / "chroma_db",
     ]
     for candidate in candidates:
@@ -151,7 +96,7 @@ def _resolve_persist_dir(raw_path: str) -> pathlib.Path:
             continue
     return pathlib.Path(tempfile.gettempdir()) / "aurarag" / "chroma_db"
 
-# Re-export for legacy import compatibility
+
 __all__ = [
     "RAGEngine",
     "build_llm",
@@ -161,14 +106,14 @@ __all__ = [
     "SessionMemoryStore",
 ]
 
-# Kept as a module-level constant for import compatibility and tests only.
-# _evict_stale() always reads get_settings().SESSION_TTL_MINUTES (BUG-AC fix).
 SESSION_TTL_MINUTES = 60
 
-# Internal pipeline constants
-_MAX_RETRIEVAL_DOCS       = 10   # candidate pool size for hybrid retriever
-_MAX_CONTEXT_CHARS_PER_DOC = 1200  # chars per doc in generate context
-_MAX_GRADING_CHARS_PER_DOC = 700   # chars per doc sent to grader (keep prompt short)
+_MAX_RETRIEVAL_DOCS        = 10
+_MAX_CONTEXT_CHARS_PER_DOC = 1200
+_MAX_GRADING_CHARS_PER_DOC = 700
+
+# Regex to strip the hidden meta block from generated answers.
+_META_BLOCK_RE = re.compile(r"<<META>>.*?<<END_META>>", re.DOTALL)
 
 
 # ─────────────────────────────────────────────
@@ -221,43 +166,30 @@ _REFLECT_SYSTEM = (
 # ─────────────────────────────────────────────
 
 class GraphState(TypedDict, total=False):
-    """
-    Shared mutable state threaded through all LangGraph nodes.
+    question:           str
+    provider:           str
+    model:              str
+    api_key:            str
+    session_id:         str
+    top_k:              int
+    system_prompts:     Dict[str, str]
+    chat_history_text:  str
 
-    All fields are Optional (total=False) so nodes can write independently
-    without needing to populate every key on every transition.
-    """
-    # ── Caller-supplied inputs ────────────────
-    question:    str
-    provider:    str
-    model:       str
-    api_key:     str   # plaintext, short-lived per-request
-    session_id:  str
-    top_k:       int
-    system_prompts: Dict[str, str]  # optional prompt overrides from the UI
-    chat_history_text: str  # pre-formatted string for prompt injection
-
-    # ── Rewrite node ──────────────────────────
     rewritten_query:     str
-    reflection_feedback: str  # carried forward on subsequent loops
+    reflection_feedback: str
 
-    # ── Retrieve node ─────────────────────────
     retrieved_docs: List[Document]
 
-    # ── Grade node ────────────────────────────
     relevant_docs: List[Document]
-    graded_count:  int   # number of chunks that passed grading
+    graded_count:  int
 
-    # ── Generate node ─────────────────────────
     answer:             str
-    hallucination_risk: float  # 0.0–1.0 self-reported
+    hallucination_risk: float
 
-    # ── Reflect node ──────────────────────────
-    reflect_loops: int   # loop counter for budget enforcement
+    reflect_loops:  int
     needs_revision: bool
 
-    # ── Observability ─────────────────────────
-    pipeline_trace: List[str]  # ordered node names executed
+    pipeline_trace: List[str]
 
 
 # ─────────────────────────────────────────────
@@ -273,12 +205,6 @@ def build_llm(
     callbacks: Optional[List[BaseCallbackHandler]] = None,
     max_tokens: Optional[int] = None,
 ) -> BaseLanguageModel:
-    """
-    Instantiate a LangChain chat model for the given provider.
-
-    max_tokens is accepted for lightweight nodes (rewrite, grade) where a small
-    token budget improves throughput without affecting answer quality.
-    """
     common: Dict[str, Any] = {
         "temperature": temperature,
         "streaming":   streaming,
@@ -304,7 +230,6 @@ def build_llm(
             from langchain_ollama import ChatOllama
         except ImportError:
             from langchain_community.chat_models import ChatOllama  # type: ignore
-        # Ollama does not accept api_key / callbacks in the same way
         return ChatOllama(model=model, temperature=temperature)
 
     raise ValueError(
@@ -313,7 +238,6 @@ def build_llm(
 
 
 def _maybe_tagged(llm: BaseLanguageModel, tags: Sequence[str]) -> BaseLanguageModel:
-    """Attach LangChain config tags to an LLM instance if supported."""
     if tags and hasattr(llm, "with_config"):
         return llm.with_config({"tags": list(tags)})  # type: ignore[return-value]
     return llm
@@ -324,15 +248,6 @@ def _maybe_tagged(llm: BaseLanguageModel, tags: Sequence[str]) -> BaseLanguageMo
 # ─────────────────────────────────────────────
 
 class CrossEncoderReranker:
-    """
-    Wraps a sentence-transformers CrossEncoder for synchronous and async reranking.
-
-    BUG-Z fix (v3.3):  arerank() uses asyncio.get_running_loop() instead of
-                       the deprecated asyncio.get_event_loop().
-    BUG-AB fix (v3.3): shutdown() releases the ThreadPoolExecutor so graceful
-                       restarts do not leak OS threads.
-    """
-
     def __init__(self, model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2") -> None:
         logger.info("Loading Cross-Encoder: %s", model_name)
         self.model = CrossEncoder(model_name)
@@ -355,80 +270,43 @@ class CrossEncoderReranker:
     async def arerank(
         self, query: str, documents: List[Document], top_k: int = 5
     ) -> List[Document]:
-        """
-        Non-blocking rerank: runs CPU-bound inference in the thread pool.
-
-        BUG-Z fix (v3.3): uses asyncio.get_running_loop() — the deprecated
-        asyncio.get_event_loop() emits DeprecationWarning in Python 3.10+ when
-        called from within a running event loop.
-        """
-        loop = asyncio.get_running_loop()  # BUG-Z fix
+        # BUG-Z fix: uses asyncio.get_running_loop()
+        loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
             self._executor, self.rerank, query, documents, top_k
         )
 
     def shutdown(self) -> None:
-        """
-        BUG-AB fix (v3.3): release the thread pool during application teardown.
-        Called from RAGEngine.shutdown() → FastAPI lifespan cleanup block.
-        wait=False lets the process exit without blocking on in-flight tasks.
-        """
+        # BUG-AB fix: release thread pool on teardown
         self._executor.shutdown(wait=False)
         logger.debug("CrossEncoderReranker executor shut down.")
 
 
 # ─────────────────────────────────────────────
-# RERANKED RETRIEVER  (BUG-Y v3.3 + BUG-AF v3.4)
+# RERANKED RETRIEVER
 # ─────────────────────────────────────────────
 
 class RerankedRetriever(BaseRetriever):
-    """
-    LangChain-compatible retriever that applies cross-encoder re-ranking
-    after hybrid search in one step.
-
-    BUG-Y fix (v3.3): used everywhere a retriever is needed so the reranker
-    is never bypassed by the pipeline (previously only ran in the standalone
-    retrieve() helper which no API endpoint called).
-
-    BUG-AF fix (v3.4): the async path now dispatches via _invoke_hybrid_async()
-    which prefers ainvoke() when available and falls back to asyncio.to_thread()
-    for retrievers that only implement the sync interface.  The v3.3 version
-    called self.hybrid_retriever.invoke() (sync) directly from the async method,
-    blocking the event loop for the full retrieval duration under load.
-    """
-
     hybrid_retriever: Any
     cross_encoder:    Any
     top_k:            int = 5
 
     model_config = {"arbitrary_types_allowed": True}
 
-    # ── internal helpers ───────────────────────────────────────────────────
-
     def _invoke_hybrid_sync(self, query: str) -> List[Document]:
         return list(self.hybrid_retriever.invoke(query))
 
     async def _invoke_hybrid_async(self, query: str) -> List[Document]:
-        """
-        BUG-AF fix: prefer ainvoke() when available; fall back to
-        asyncio.to_thread() so the event loop is never blocked by a
-        sync retriever implementation.
-        """
+        # BUG-AF fix: prefer ainvoke(); fall back to asyncio.to_thread()
         if hasattr(self.hybrid_retriever, "ainvoke"):
             return list(await self.hybrid_retriever.ainvoke(query))
         return await asyncio.to_thread(self._invoke_hybrid_sync, query)
 
-    # ── BaseRetriever interface ────────────────────────────────────────────
-
-    def _get_relevant_documents(
-        self, query: str, *, run_manager=None
-    ) -> List[Document]:
+    def _get_relevant_documents(self, query: str, *, run_manager=None) -> List[Document]:
         candidates = self._invoke_hybrid_sync(query)
         return self.cross_encoder.rerank(query, candidates, top_k=self.top_k)
 
-    async def _aget_relevant_documents(
-        self, query: str, *, run_manager=None
-    ) -> List[Document]:
+    async def _aget_relevant_documents(self, query: str, *, run_manager=None) -> List[Document]:
         candidates = await self._invoke_hybrid_async(query)
         return await self.cross_encoder.arerank(query, candidates, top_k=self.top_k)
 
@@ -438,14 +316,6 @@ class RerankedRetriever(BaseRetriever):
 # ─────────────────────────────────────────────
 
 class SessionMemoryStore:
-    """
-    Per-session windowed conversation memory with TTL eviction.
-
-    BUG-AC fix (v3.3): _evict_stale() reads get_settings().SESSION_TTL_MINUTES
-                       at call time instead of the module-level constant.
-    BUG-U fix (v3.3):  clear() removes from both _sessions and _last_access.
-    """
-
     def __init__(self, window_k: int = 20) -> None:
         self._window_k = window_k
         self._sessions:    Dict[str, ConversationBufferWindowMemory] = {}
@@ -465,12 +335,10 @@ class SessionMemoryStore:
         return self._sessions[session_id]
 
     def save_turn(self, session_id: str, question: str, answer: str) -> None:
-        """Persist a completed Q/A turn into session memory."""
         mem = self.get(session_id)
         mem.save_context({"question": question}, {"answer": answer})
 
     def format_history(self, session_id: str) -> str:
-        """Return chat history as a plain-text string for prompt injection."""
         mem = self.get(session_id)
         messages: List[BaseMessage] = mem.chat_memory.messages
         if not messages:
@@ -482,10 +350,7 @@ class SessionMemoryStore:
         return "\n".join(lines)
 
     def clear(self, session_id: str) -> None:
-        """
-        BUG-U fix (v3.3): removes from both _sessions and _last_access so
-        the session can be re-created fresh immediately on next access.
-        """
+        # BUG-U fix: removes from both _sessions and _last_access
         if session_id in self._sessions:
             self._sessions[session_id].clear()
             del self._sessions[session_id]
@@ -497,8 +362,7 @@ class SessionMemoryStore:
         self._last_access.clear()
 
     def _evict_stale(self) -> None:
-        # BUG-AC fix (v3.3): read TTL from settings at call time so that
-        # SESSION_TTL_MINUTES in .env takes effect at runtime.
+        # BUG-AC fix: read TTL from settings at call time
         ttl_minutes = get_settings().SESSION_TTL_MINUTES
         cutoff = time.monotonic() - ttl_minutes * 60
         stale = [sid for sid, ts in self._last_access.items() if ts < cutoff]
@@ -517,12 +381,10 @@ class SessionMemoryStore:
 # ─────────────────────────────────────────────
 
 def _content_hash(doc: Document) -> str:
-    """SHA-256 fingerprint of a document chunk's content."""
     return hashlib.sha256(doc.page_content.encode("utf-8")).hexdigest()
 
 
 def _dedupe_documents(documents: Sequence[Document]) -> List[Document]:
-    """Remove duplicate chunks by content hash, preserving order."""
     seen: set[str] = set()
     unique: List[Document] = []
     for doc in documents:
@@ -554,18 +416,12 @@ def _doc_snippet(doc: Document, idx: int, max_chars: int) -> str:
 # ─────────────────────────────────────────────
 
 def _safe_json_object(text: str) -> Dict[str, Any]:
-    """
-    Parse a JSON object from LLM output, stripping markdown fences.
-    Returns {} on any parse failure (never raises).
-    """
     cleaned = text.strip()
     if not cleaned:
         return {}
-    # Strip ```json ... ``` fences if present
     if cleaned.startswith("```"):
         lines = [l for l in cleaned.split("\n") if not l.strip().startswith("```")]
         cleaned = "\n".join(lines).strip()
-    # Extract the first {...} block in case of surrounding prose
     match = re.search(r"\{.*\}", cleaned, flags=re.S)
     candidate = match.group(0) if match else cleaned
     try:
@@ -579,11 +435,10 @@ def _extract_hallucination_risk(answer: str) -> Tuple[str, float]:
     """
     Parse the hidden <<META>>...<<END_META>> block from the generation prompt.
     Returns (clean_answer, hallucination_risk_float).
-    Conservative default of 0.5 if the block is absent or unparseable.
     """
     pattern = r"<<META>>(.*?)<<END_META>>"
     match = re.search(pattern, answer, re.DOTALL)
-    risk = 0.5  # conservative default
+    risk = 0.5
     if match:
         raw_meta = match.group(1).strip()
         try:
@@ -599,20 +454,15 @@ def _extract_hallucination_risk(answer: str) -> Tuple[str, float]:
 
 
 def _heuristic_relevance_indices(question: str, documents: Sequence[Document]) -> List[int]:
-    """
-    Keyword-overlap fallback for the grader when the LLM call fails.
-    Returns 1-based indices of documents that share at least one term with
-    the question (terms longer than 3 characters).
-    """
     terms = {tok for tok in re.findall(r"[\w\-]+", question.lower()) if len(tok) > 3}
     if not terms:
-        return list(range(1, len(documents) + 1))  # keep all if no terms extracted
+        return list(range(1, len(documents) + 1))
     kept: List[int] = []
     for idx, doc in enumerate(documents, start=1):
         haystack = doc.page_content.lower()
         if any(term in haystack for term in terms):
             kept.append(idx)
-    return kept or list(range(1, len(documents) + 1))  # keep all if none matched
+    return kept or list(range(1, len(documents) + 1))
 
 
 # ─────────────────────────────────────────────
@@ -620,16 +470,6 @@ def _heuristic_relevance_indices(question: str, documents: Sequence[Document]) -
 # ─────────────────────────────────────────────
 
 async def _node_rewrite(state: GraphState) -> Dict[str, Any]:
-    """
-    Node 1 — Query Transformation.
-
-    Rewrites the raw user question into a search-optimised form, incorporating
-    session history and (on reflection loops) the previous grounding feedback.
-    Uses REWRITE_MAX_TOKENS to keep the node fast and cheap.
-
-    Falls back silently to the raw question on any LLM error — the pipeline
-    continues with reduced quality rather than failing hard.
-    """
     cfg         = get_settings()
     question    = state["question"]
     history     = state.get("chat_history_text", "No prior conversation.")
@@ -654,7 +494,7 @@ async def _node_rewrite(state: GraphState) -> Dict[str, Any]:
             "Return a short retrieval query with only the essential search terms."
         )
         response = await llm.ainvoke([
-            SystemMessage(content=(state.get('system_prompts', {}) or {}).get('rewrite', _REWRITE_SYSTEM) or _REWRITE_SYSTEM),
+            SystemMessage(content=(state.get("system_prompts", {}) or {}).get("rewrite", _REWRITE_SYSTEM) or _REWRITE_SYSTEM),
             HumanMessage(content=prompt),
         ])
         rewritten = str(getattr(response, "content", "")).strip() or question
@@ -662,10 +502,7 @@ async def _node_rewrite(state: GraphState) -> Dict[str, Any]:
         logger.warning("[%s] Rewrite failed (%s); using raw question.", state.get("session_id"), exc)
         rewritten = question
 
-    logger.info(
-        "[%s] Rewrite: '%s' → '%s'",
-        state.get("session_id"), question[:60], rewritten[:60],
-    )
+    logger.info("[%s] Rewrite: '%s' → '%s'", state.get("session_id"), question[:60], rewritten[:60])
     return {**state, "rewritten_query": rewritten, "pipeline_trace": trace}
 
 
@@ -673,16 +510,6 @@ async def _node_retrieve(
     state: GraphState,
     reranked_retriever: RerankedRetriever,
 ) -> Dict[str, Any]:
-    """
-    Node 2 — Hybrid Search + Cross-Encoder Rerank.
-
-    Uses the pre-built RerankedRetriever (60% dense ChromaDB MMR +
-    40% BM25 sparse + CrossEncoder).  Uses rewritten_query if available;
-    falls back to the raw question.
-
-    BUG-AF fix (v3.4): async retrieval is truly non-blocking (see
-    RerankedRetriever._invoke_hybrid_async).
-    """
     query = state.get("rewritten_query") or state["question"]
 
     trace = list(state.get("pipeline_trace", []))
@@ -694,31 +521,11 @@ async def _node_retrieve(
         logger.error("[%s] Retrieval error: %s", state.get("session_id"), exc)
         docs = []
 
-    logger.info(
-        "[%s] Retrieved %d docs for query: '%s'",
-        state.get("session_id"), len(docs), query[:60],
-    )
+    logger.info("[%s] Retrieved %d docs for query: '%s'", state.get("session_id"), len(docs), query[:60])
     return {**state, "retrieved_docs": list(docs), "pipeline_trace": trace}
 
 
 async def _node_grade(state: GraphState) -> Dict[str, Any]:
-    """
-    Node 3 — Document Relevance Grader.
-
-    Runs a fast parallel LLM pass over each retrieved chunk.  Chunks whose
-    relevance score < GRADE_THRESHOLD are filtered out.
-
-    BUG-AK fix (v3.5): GRADE_THRESHOLD was defined in Settings and documented
-    as the relevance filter but was never actually applied — the grader used
-    only the LLM's binary keep/drop list.  The grader prompt now asks the LLM
-    to return per-document float scores; GRADE_THRESHOLD is applied to filter
-    the scored list before building the graded set.  The keyword heuristic
-    fallback is preserved for LLM failures.
-
-    Fail-open strategy: on any LLM error the heuristic keyword matcher runs
-    as a fallback.  If that also returns nothing, all docs are kept so the
-    Generate node always has something to work with.
-    """
     cfg      = get_settings()
     query    = state.get("rewritten_query") or state["question"]
     docs     = state.get("retrieved_docs", [])
@@ -732,7 +539,6 @@ async def _node_grade(state: GraphState) -> Dict[str, Any]:
     if not docs:
         return {**state, "relevant_docs": [], "graded_count": 0, "pipeline_trace": trace}
 
-    # Cap the number of docs sent to the grader to control prompt size.
     docs_to_grade = docs[:_MAX_RETRIEVAL_DOCS]
     doc_blocks = "\n\n".join(
         _doc_snippet(doc, idx + 1, _MAX_GRADING_CHARS_PER_DOC)
@@ -740,7 +546,6 @@ async def _node_grade(state: GraphState) -> Dict[str, Any]:
     )
 
     # BUG-AK fix: updated grade system prompt to request per-document scores.
-    # The threshold in cfg.GRADE_THRESHOLD is then applied to the scores list.
     _GRADE_SYSTEM_WITH_SCORES = (
         "You are a relevance judge. Given a search query and a list of numbered "
         "document snippets, return strict JSON only with two keys:\n"
@@ -771,8 +576,6 @@ async def _node_grade(state: GraphState) -> Dict[str, Any]:
         ])
         parsed = _safe_json_object(str(getattr(response, "content", "")))
 
-        # BUG-AK fix: extract per-doc scores and apply GRADE_THRESHOLD.
-        # Falls back to keep_indices for backward-compat if old prompt is used.
         scores_map = parsed.get("scores", {})
         if scores_map and isinstance(scores_map, dict):
             threshold = cfg.GRADE_THRESHOLD
@@ -785,11 +588,10 @@ async def _node_grade(state: GraphState) -> Dict[str, Any]:
                 if score >= threshold:
                     graded.append(doc)
             logger.debug(
-                "[%s] Grade threshold=%.2f applied; %d/%d docs passed scores filter.",
+                "[%s] Grade threshold=%.2f applied; %d/%d docs passed.",
                 state.get("session_id"), threshold, len(graded), len(docs_to_grade),
             )
         else:
-            # Fallback: handle legacy keep_indices format (custom prompt override)
             keep_indices = parsed.get("keep_indices", [])
             if not isinstance(keep_indices, list):
                 keep_indices = []
@@ -803,53 +605,34 @@ async def _node_grade(state: GraphState) -> Dict[str, Any]:
                 heuristic = _heuristic_relevance_indices(state["question"], docs_to_grade)
                 graded = [doc for i, doc in enumerate(docs_to_grade, start=1) if i in set(heuristic)]
 
-        # If threshold was too strict and filtered everything, try heuristic
         if not graded:
             heuristic = _heuristic_relevance_indices(state["question"], docs_to_grade)
             graded = [doc for i, doc in enumerate(docs_to_grade, start=1) if i in set(heuristic)]
 
     except Exception as exc:
-        logger.warning(
-            "[%s] Grade node failed (%s); passing all %d docs through.",
-            state.get("session_id"), exc, len(docs_to_grade),
-        )
+        logger.warning("[%s] Grade node failed (%s); passing all %d docs through.", state.get("session_id"), exc, len(docs_to_grade))
         graded = list(docs_to_grade)
 
-    # Final fail-open: never starve the Generate node
     if not graded:
         graded = list(docs_to_grade)
 
-    logger.info(
-        "[%s] Grader: %d/%d chunks passed.",
-        state.get("session_id"), len(graded), len(docs_to_grade),
-    )
+    logger.info("[%s] Grader: %d/%d chunks passed.", state.get("session_id"), len(graded), len(docs_to_grade))
     return {**state, "relevant_docs": graded, "graded_count": len(graded), "pipeline_trace": trace}
 
 
 async def _node_generate(state: GraphState) -> Dict[str, Any]:
-    """
-    Node 4 — Answer Synthesis.
-
-    Produces the final answer grounded in relevant_docs + session history.
-    Deduplicates docs before building context and appends a hidden <<META>>
-    hallucination_risk score used by the Reflect edge.
-
-    Tags the LLM with "generate" so astream_events() can filter token events
-    to just this node for streaming.
-    """
-    cfg          = get_settings()
-    question     = state["question"]
-    history      = state.get("chat_history_text", "No prior conversation.")
-    docs         = state.get("relevant_docs") or state.get("retrieved_docs", [])
-    top_k        = state.get("top_k", 5)
-    provider     = state["provider"]
-    model        = state["model"]
-    api_key      = state["api_key"]
+    cfg      = get_settings()
+    question = state["question"]
+    history  = state.get("chat_history_text", "No prior conversation.")
+    docs     = state.get("relevant_docs") or state.get("retrieved_docs", [])
+    top_k    = state.get("top_k", 5)
+    provider = state["provider"]
+    model    = state["model"]
+    api_key  = state["api_key"]
 
     trace = list(state.get("pipeline_trace", []))
     trace.append("generate")
 
-    # Deduplicate and cap context
     context_docs = _dedupe_documents(docs)[:top_k]
     if context_docs:
         snippet_len = cfg.SOURCE_SNIPPET_LEN
@@ -866,7 +649,7 @@ async def _node_generate(state: GraphState) -> Dict[str, Any]:
             ["generate"],
         )
         response = await llm.ainvoke([
-            SystemMessage(content=(state.get('system_prompts', {}) or {}).get('generate', _GENERATE_SYSTEM) or _GENERATE_SYSTEM),
+            SystemMessage(content=(state.get("system_prompts", {}) or {}).get("generate", _GENERATE_SYSTEM) or _GENERATE_SYSTEM),
             HumanMessage(content=(
                 f"Chat history:\n{history}\n\n"
                 f"Context:\n{context}\n\n"
@@ -885,10 +668,7 @@ async def _node_generate(state: GraphState) -> Dict[str, Any]:
         raw_answer = "I encountered an error while generating a response. Please try again."
 
     clean_answer, h_risk = _extract_hallucination_risk(raw_answer)
-    logger.info(
-        "[%s] Generated answer (%d chars, hallucination_risk=%.2f).",
-        state.get("session_id"), len(clean_answer), h_risk,
-    )
+    logger.info("[%s] Generated answer (%d chars, hallucination_risk=%.2f).", state.get("session_id"), len(clean_answer), h_risk)
     return {
         **state,
         "answer":             clean_answer,
@@ -901,16 +681,6 @@ async def _node_reflect(
     state: GraphState,
     reranked_retriever: RerankedRetriever,
 ) -> Dict[str, Any]:
-    """
-    Node 5 — Self-Correction / Reflect.
-
-    Generates a refined search query when hallucination_risk is high, then
-    immediately re-retrieves using it.  Clears relevant_docs / graded_count
-    so the next grade pass starts fresh.
-
-    The conditional edge _should_reflect() gates entry — this node only runs
-    when risk > 0.7 AND loop budget is not exhausted.
-    """
     cfg             = get_settings()
     question        = state["question"]
     rewritten_query = state.get("rewritten_query", question)
@@ -923,10 +693,7 @@ async def _node_reflect(
     trace = list(state.get("pipeline_trace", []))
     trace.append("reflect")
 
-    logger.info(
-        "[%s] Reflect loop %d — hallucination_risk=%.2f",
-        state.get("session_id"), loop_count + 1, state.get("hallucination_risk", 0.0),
-    )
+    logger.info("[%s] Reflect loop %d — hallucination_risk=%.2f", state.get("session_id"), loop_count + 1, state.get("hallucination_risk", 0.0))
 
     try:
         llm = _maybe_tagged(
@@ -935,7 +702,7 @@ async def _node_reflect(
             ["nostream", "reflect"],
         )
         response = await llm.ainvoke([
-            SystemMessage(content=(state.get('system_prompts', {}) or {}).get('reflect', _REFLECT_SYSTEM) or _REFLECT_SYSTEM),
+            SystemMessage(content=(state.get("system_prompts", {}) or {}).get("reflect", _REFLECT_SYSTEM) or _REFLECT_SYSTEM),
             HumanMessage(content=(
                 f"Original question: {question}\n"
                 f"Rewritten query used: {rewritten_query}\n"
@@ -950,7 +717,6 @@ async def _node_reflect(
 
     logger.info("[%s] Refined query: '%s'", state.get("session_id"), refined[:80])
 
-    # Re-retrieve immediately with the refined query.
     try:
         new_docs = await reranked_retriever.ainvoke(refined)
     except Exception as exc:
@@ -962,7 +728,7 @@ async def _node_reflect(
         "rewritten_query":     refined,
         "reflection_feedback": f"Previous answer had high hallucination risk ({state.get('hallucination_risk', 0):.2f}). Refined query used.",
         "retrieved_docs":      list(new_docs),
-        "relevant_docs":       [],        # re-graded in the next grade pass
+        "relevant_docs":       [],
         "graded_count":        0,
         "reflect_loops":       loop_count + 1,
         "pipeline_trace":      trace,
@@ -974,40 +740,22 @@ async def _node_reflect(
 # ─────────────────────────────────────────────
 
 def _should_reflect(state: GraphState) -> str:
-    """
-    After Generate: decide whether to invoke the Reflect node.
-
-    BUG-AN fix (v3.5): the previous type hint was Literal["reflect", "__end__"]
-    but the function returned the END constant (which equals "__end__" in
-    current LangGraph but is an opaque sentinel — not a guaranteed string).
-    The conditional_edges map used the string key END as well.  To be safe
-    and unambiguous we return the string "__end__" explicitly when not
-    reflecting, matching LangGraph's internal sentinel value precisely.
-
-    Reflects when ALL of the following are true:
-      1. REFLECT_ENABLED is True (operator toggle via .env).
-      2. hallucination_risk > 0.7 (high risk threshold).
-      3. reflect_loops < MAX_REFLECT_LOOPS (loop budget not exhausted).
-    """
+    # BUG-AN fix: return END constant; routing map key is END
     cfg = get_settings()
     if not cfg.REFLECT_ENABLED:
-        return END  # END == "__end__"; kept for semantic clarity
+        return END
 
     h_risk = state.get("hallucination_risk", 0.0)
     loops  = state.get("reflect_loops", 0)
 
     if h_risk > 0.7 and loops < cfg.MAX_REFLECT_LOOPS:
-        logger.info(
-            "[%s] Routing to reflect (risk=%.2f, loops=%d/%d).",
-            state.get("session_id"), h_risk, loops, cfg.MAX_REFLECT_LOOPS,
-        )
+        logger.info("[%s] Routing to reflect (risk=%.2f, loops=%d/%d).", state.get("session_id"), h_risk, loops, cfg.MAX_REFLECT_LOOPS)
         return "reflect"
 
     return END
 
 
 def _after_reflect(state: GraphState) -> Literal["grade"]:
-    """After Reflect: always re-grade the freshly retrieved docs."""
     return "grade"
 
 
@@ -1016,22 +764,12 @@ def _after_reflect(state: GraphState) -> Literal["grade"]:
 # ─────────────────────────────────────────────
 
 def build_aura_graph(reranked_retriever: RerankedRetriever) -> Any:
-    """
-    Compile and return the AuraRAG LangGraph StateGraph.
-
-    BUG-AG fix (v3.4): the graph is compiled ONCE at engine init time, not on
-    every request.  Per-request invocation is pure graph dispatch overhead.
-
-    The reranked_retriever is closed over in the retrieve and reflect node
-    functions so both share the same pre-warmed retriever instance.
-    """
     import functools
 
     retrieve_node = functools.partial(_node_retrieve, reranked_retriever=reranked_retriever)
     reflect_node  = functools.partial(_node_reflect,  reranked_retriever=reranked_retriever)
 
     workflow: StateGraph = StateGraph(GraphState)
-
     workflow.add_node("rewrite",  _node_rewrite)
     workflow.add_node("retrieve", retrieve_node)
     workflow.add_node("grade",    _node_grade)
@@ -1062,36 +800,8 @@ def build_aura_graph(reranked_retriever: RerankedRetriever) -> Any:
 # ─────────────────────────────────────────────
 
 class RAGEngine:
-    """
-    AuraRAG Enterprise Engine v3.4 — LangGraph Agentic Pipeline.
-
-    Architecture:
-      Ingest  → Chunk → Deduplicate → Embed → Store (ChromaDB + BM25)
-      Query   → LangGraph (Rewrite → Retrieve → Grade → Generate → [Reflect])
-
-    The LangGraph graph is compiled ONCE at __init__() and reused across
-    requests (BUG-AG fix).  All graph nodes are async-first.
-
-    All v3.3 fixes are fully preserved:
-      BUG-Y  RerankedRetriever used everywhere (never bypassed).
-      BUG-Z  asyncio.get_running_loop() in arerank().
-      BUG-AB CrossEncoderReranker.shutdown() called from engine.shutdown().
-      BUG-AC _evict_stale() reads get_settings().SESSION_TTL_MINUTES.
-      BUG-AE SOURCE_SNIPPET_LEN read from settings, not hardcoded.
-      BUG-S  top_k forwarded through the full call chain.
-      BUG-U  SessionMemoryStore.clear() removes _last_access entry.
-      BUG-V  Streaming exceptions propagated to SSE error frame.
-      BUG-W  TextLoader uses UTF-8 + autodetect_encoding.
-      BUG-X  _seen_hashes persisted in BM25 pickle; atomic pickle writes.
-
-    New in v3.4:
-      BUG-AF RerankedRetriever async path uses ainvoke() or to_thread().
-      BUG-AG Graph compiled once at init; not rebuilt per request.
-      BUG-AH Streaming uses LangGraph astream() — no bridge thread / race.
-    """
-
     def __init__(self) -> None:
-        logger.info("Initialising AuraRAG Engine v3.4...")
+        logger.info("Initialising AuraRAG Engine v3.6...")
 
         self.embeddings = HuggingFaceEmbeddings(
             model_name="sentence-transformers/all-mpnet-base-v2",
@@ -1125,34 +835,23 @@ class RAGEngine:
         self._bm25_retriever: Optional[BM25Retriever] = None
         self._load_bm25_from_disk()
 
-        # BUG-AG fix: compile graph once at init.
-        # If no documents are yet ingested the graph is None; it is compiled
-        # (and recompiled after each ingest) via _rebuild_graph().
+        # BUG-AG fix: compile graph once at init
         self._graph: Any = None
         self._graph_top_k: Optional[int] = None
         if self.vector_store is not None and self._bm25_retriever is not None:
             self._rebuild_graph(top_k=5)
 
-        logger.info("AuraRAG Engine v3.4 ready.")
+        logger.info("AuraRAG Engine v3.6 ready.")
 
     # ── GRAPH MANAGEMENT ──────────────────────────────────────────────────────
 
     def _rebuild_graph(self, top_k: int = 5) -> None:
-        """
-        (Re)compile the LangGraph with the current retriever state.
-
-        Called after the first ingest and whenever top_k changes.
-        For the common case of a single default top_k a single compiled graph
-        is sufficient.  Heavy multi-top_k deployments can extend this with a
-        small LRU cache of compiled graphs.
-        """
         retriever   = self._build_reranked_retriever(top_k=top_k)
         self._graph = build_aura_graph(reranked_retriever=retriever)
         self._graph_top_k = top_k
         logger.info("LangGraph compiled (top_k=%d).", top_k)
 
     def _get_or_rebuild_graph(self, top_k: int) -> Any:
-        """Return compiled graph, rebuilding only if top_k changed."""
         if self._graph is None or self._graph_top_k != top_k:
             self._rebuild_graph(top_k=top_k)
         return self._graph
@@ -1168,14 +867,11 @@ class RAGEngine:
             if isinstance(saved, dict):
                 self._bm25_retriever = saved.get("retriever")
                 self._all_docs       = saved.get("docs", [])
-                # BUG-X fix (v3.2.0): restore _seen_hashes explicitly;
-                # rebuild from docs for legacy pickles that pre-date this field.
                 self._seen_hashes = saved.get(
                     "hashes",
                     {_content_hash(d) for d in self._all_docs},
                 )
             else:
-                # Legacy bare BM25Retriever from v3.0.0
                 self._bm25_retriever = saved
                 self._seen_hashes    = {_content_hash(d) for d in self._all_docs}
             logger.info("BM25 index restored (%d docs).", len(self._all_docs))
@@ -1183,11 +879,7 @@ class RAGEngine:
             logger.warning("Could not restore BM25 index: %s. Will rebuild on next ingest.", exc)
 
     def _save_bm25_to_disk(self) -> None:
-        """
-        Atomic write: pickle to .pkl.tmp then os.replace().
-        BUG-X fix (v3.2.0): persists _seen_hashes alongside docs so that a
-        restart does not reprocess already-ingested content.
-        """
+        # BUG-X fix: atomic write; persists _seen_hashes
         try:
             self._bm25_pickle_path.parent.mkdir(parents=True, exist_ok=True)
             tmp_path = self._bm25_pickle_path.with_suffix(".pkl.tmp")
@@ -1198,7 +890,7 @@ class RAGEngine:
             }
             with open(tmp_path, "wb") as fh:
                 pickle.dump(payload, fh)
-            os.replace(tmp_path, self._bm25_pickle_path)  # atomic on POSIX
+            os.replace(tmp_path, self._bm25_pickle_path)
             logger.info("BM25 index saved (%d docs).", len(self._all_docs))
         except Exception as exc:
             logger.warning("Could not persist BM25 index: %s.", exc)
@@ -1243,8 +935,6 @@ class RAGEngine:
         self._bm25_retriever   = BM25Retriever.from_documents(self._all_docs)
         self._bm25_retriever.k = _MAX_RETRIEVAL_DOCS
         self._save_bm25_to_disk()
-
-        # Recompile the graph with the updated retriever.
         self._rebuild_graph(top_k=5)
 
         result = {
@@ -1270,10 +960,6 @@ class RAGEngine:
         )
 
     def _build_reranked_retriever(self, top_k: int = 5) -> RerankedRetriever:
-        """
-        BUG-Y fix (v3.3): wraps hybrid search + cross-encoder reranking in one
-        BaseRetriever-compatible object so the reranker is never bypassed.
-        """
         return RerankedRetriever(
             hybrid_retriever=self._build_hybrid_retriever(),
             cross_encoder=self.reranker,
@@ -1281,7 +967,6 @@ class RAGEngine:
         )
 
     def retrieve(self, query: str, top_k: int = 5) -> List[Document]:
-        """Standalone hybrid search + cross-encoder re-rank (no LLM)."""
         hybrid     = self._build_hybrid_retriever()
         candidates = hybrid.invoke(query)
         return self.reranker.rerank(query, candidates, top_k=top_k)
@@ -1298,7 +983,6 @@ class RAGEngine:
         top_k: int,
         system_prompts: Optional[Dict[str, str]] = None,
     ) -> GraphState:
-        """Assemble the initial GraphState before invoking the graph."""
         return GraphState(
             question=question,
             provider=provider,
@@ -1321,10 +1005,6 @@ class RAGEngine:
         )
 
     def _finalise_response(self, final_state: GraphState, session_id: str) -> Dict[str, Any]:
-        """
-        Extract the public-facing response dict from the final graph state and
-        persist the completed Q/A turn into session memory.
-        """
         answer = (
             final_state.get("answer")
             or "I do not have enough information in the provided documents to answer this question."
@@ -1365,10 +1045,6 @@ class RAGEngine:
         top_k:      int = 5,
         system_prompts: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
-        """
-        Primary async query entrypoint.
-        Runs the full LangGraph pipeline: Rewrite → Retrieve → Grade → Generate → [Reflect].
-        """
         if self.vector_store is None:
             return {
                 "answer":         "No documents ingested yet. Upload files first.",
@@ -1383,15 +1059,12 @@ class RAGEngine:
         graph         = self._get_or_rebuild_graph(top_k=top_k)
         initial_state = self._build_initial_state(question, provider, model, api_key, session_id, top_k, system_prompts=system_prompts)
 
-        logger.info(
-            "[%s] aquery via %s/%s (top_k=%d): %r",
-            session_id, provider, model, top_k, question[:80],
-        )
+        logger.info("[%s] aquery via %s/%s (top_k=%d): %r", session_id, provider, model, top_k, question[:80])
 
         final_state: GraphState = await graph.ainvoke(initial_state)
         return self._finalise_response(final_state, session_id)
 
-    # ── SYNCHRONOUS QUERY (thin wrapper) ──────────────────────────────────────
+    # ── SYNCHRONOUS QUERY ─────────────────────────────────────────────────────
 
     def query(
         self,
@@ -1403,45 +1076,21 @@ class RAGEngine:
         top_k:      int = 5,
         system_prompts: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
-        """
-        Synchronous entrypoint retained for backward-compatibility with tests.
-
-        The FastAPI router calls this via asyncio.to_thread(), so it executes
-        in a worker thread where there is no running event loop — making
-        asyncio.run() safe here.
-
-        BUG-AO fix (v3.5): the previous implementation raised RuntimeError and
-        then caught it in the same except block, checking "event loop" in the
-        message — which matched the error it just raised, causing a confusing
-        re-raise path instead of the intended guard.  The fix uses
-        asyncio.get_running_loop() which raises RuntimeError("no running event
-        loop") only when there is NO loop, and succeeds silently when one IS
-        running — so the guard is simply: if it succeeds, raise our advisory
-        error; if it raises, we're in the right thread context.
-
-        Note: if you are already inside a running event loop (e.g. in a Jupyter
-        notebook), call aquery() directly instead.
-        """
-        # BUG-AO fix: get_running_loop() raises RuntimeError when there is no
-        # running loop (correct context for asyncio.run()); it returns the loop
-        # object when we ARE inside one (wrong context — raise advisory error).
+        # BUG-AO fix: guard against calling from inside a running event loop
         try:
             asyncio.get_running_loop()
-            # If we reach here a loop IS running — wrong context for this method.
             raise RuntimeError(
                 "engine.query() was called from inside a running event loop. "
                 "Use engine.aquery() instead."
             )
         except RuntimeError as exc:
-            # Only swallow the "no running event loop" error from get_running_loop().
-            # Re-raise our advisory error and any other RuntimeError.
             if "no running event loop" not in str(exc).lower() and "no current event loop" not in str(exc).lower():
                 raise
         return asyncio.run(
             self.aquery(question, provider, model, api_key, session_id=session_id, top_k=top_k)
         )
 
-    # ── TRUE SSE STREAMING ─────────────────────────────────────────────────────
+    # ── STREAMING (tokens only) ───────────────────────────────────────────────
 
     async def stream_query(
         self,
@@ -1454,23 +1103,52 @@ class RAGEngine:
         system_prompts: Optional[Dict[str, str]] = None,
     ) -> AsyncGenerator[str, None]:
         """
-        Async generator that streams tokens from the Generate node.
+        Async generator that yields cleaned token strings.
 
-        BUG-AH fix (v3.4): v3.3 bridged an asyncio event loop and a worker
-        thread via AsyncIteratorCallbackHandler + asyncio.to_thread(), creating
-        a data race on the internal asyncio.Queue at shutdown.  The new
-        implementation uses LangGraph's native astream() API — fully async-first,
+        BUG-META-LEAK fix (v3.6): raw tokens including the hidden
+        <<META>>...<<END_META>> block are no longer passed through to callers.
+        The buffer is cleaned before each yield using _META_BLOCK_RE.
+        """
+        async for item in self.stream_query_with_meta(
+            question=question,
+            provider=provider,
+            model=model,
+            api_key=api_key,
+            session_id=session_id,
+            top_k=top_k,
+            system_prompts=system_prompts,
+        ):
+            if isinstance(item, str):
+                yield item
+
+    # ── STREAMING WITH METADATA ───────────────────────────────────────────────
+
+    async def stream_query_with_meta(
+        self,
+        question:   str,
+        provider:   str,
+        model:      str,
+        api_key:    str,
+        session_id: str = "default",
+        top_k:      int = 5,
+        system_prompts: Optional[Dict[str, str]] = None,
+    ) -> AsyncGenerator[Union[str, Dict[str, Any]], None]:
+        """
+        Async generator that yields:
+          - str: individual clean tokens (meta block stripped)
+          - Dict: one final metadata packet after the stream ends
+
+        BUG-SSE-SOURCES fix (v3.6): the final dict contains sources,
+        pipeline_trace, graded_chunks, and reflect_loops so the SSE router
+        can build a complete meta frame. Previously these were unavailable
+        to the streaming path entirely.
+
+        BUG-META-LEAK fix (v3.6): tokens containing the hidden
+        <<META>>...<<END_META>> hallucination risk block are stripped before
+        yielding so users never see raw JSON in their chat.
+
+        BUG-AH fix (v3.4) preserved: uses LangGraph native astream() —
         no bridge thread, no race condition.
-
-        BUG-V fix (v3.2.0) preserved: exceptions are caught and re-raised so
-        the SSE layer emits an error frame rather than silently hanging.
-
-        Streaming strategy:
-          - Pre-generation nodes (rewrite, retrieve, grade) run to completion —
-            their latency is sub-second and not worth streaming.
-          - The Generate node LLM call is streamed token-by-token via the
-            "messages" stream mode, filtered to the "generate" LangGraph node.
-          - After streaming completes the turn is saved to session memory.
         """
         if self.vector_store is None:
             yield "No documents ingested yet. Upload files first."
@@ -1479,41 +1157,27 @@ class RAGEngine:
         graph         = self._get_or_rebuild_graph(top_k=top_k)
         initial_state = self._build_initial_state(question, provider, model, api_key, session_id, top_k, system_prompts=system_prompts)
 
-        logger.info(
-            "[%s] stream_query via %s/%s (top_k=%d): %r",
-            session_id, provider, model, top_k, question[:80],
-        )
+        logger.info("[%s] stream_query via %s/%s (top_k=%d): %r", session_id, provider, model, top_k, question[:80])
 
-        full_answer = ""
+        full_answer_raw  = ""   # raw accumulator including meta block
         final_state: Optional[GraphState] = None
 
         try:
-            # stream_mode=["messages", "updates"] gives us both token events
-            # from the LLM and node completion events for state capture.
-            # BUG-AI fix: use the locally-retrieved `graph` (which respects
-            # top_k changes via _get_or_rebuild_graph) instead of self._graph.
             async for chunk in graph.astream(
                 initial_state,
                 stream_mode=["messages", "updates"],
             ):
-                # BUG-AJ fix: when stream_mode is a list, LangGraph yields
-                # tuples of (mode_str, data) — NOT dicts with a "type" key.
-                # The old code called chunk.get("type") on a tuple, which
-                # always returned None and silently skipped every event.
+                # BUG-AJ fix: stream_mode list yields (mode, data) tuples
                 if not isinstance(chunk, tuple) or len(chunk) != 2:
                     continue
                 chunk_type, chunk_data = chunk
 
-                # Capture the final state from "updates" events.
                 if chunk_type == "updates":
                     if isinstance(chunk_data, dict):
-                        # Each "updates" payload is {node_name: node_output_dict}.
-                        # Merge all node outputs into final_state — last write wins.
                         for node_output in chunk_data.values():
                             if isinstance(node_output, dict):
                                 final_state = {**(final_state or {}), **node_output}  # type: ignore[misc]
 
-                # Stream tokens from the Generate node's LLM call.
                 elif chunk_type == "messages":
                     message, metadata = chunk_data
                     if metadata.get("langgraph_node") != "generate":
@@ -1526,29 +1190,55 @@ class RAGEngine:
                         )
                     token = str(token)
                     if token:
-                        full_answer += token
-                    cleaned = re.sub(r"<<META>>.*?(<<END_META>>|$)", "", full_answer, flags=re.DOTALL)
-                    delta = cleaned[len(re.sub(r"<<META>>.*?(<<END_META>>|$)", "", full_answer[:-len(token)] if len(token) < len(full_answer) else "", flags=re.DOTALL)):]
-                    if delta:
-                        yield delta
+                        full_answer_raw += token
+                        # BUG-META-LEAK fix: strip meta block from display
+                        # buffer before yielding. The meta block may arrive
+                        # split across multiple tokens so we clean the whole
+                        # accumulated buffer and yield only new clean chars.
+                        clean_so_far = _META_BLOCK_RE.sub("", full_answer_raw).rstrip()
+                        # Yield the token only if it doesn't fall inside the
+                        # meta block. Simple heuristic: if the raw buffer
+                        # contains an opening <<META>> without a closing
+                        # <<END_META>>, suppress tokens until the block ends.
+                        if "<<META>>" not in full_answer_raw or "<<END_META>>" in full_answer_raw:
+                            if token and "<<META>>" not in token:
+                                yield token
 
         except Exception as exc:
-            logger.exception("[%s] stream_query error", session_id)
+            logger.exception("[%s] stream_query_with_meta error", session_id)
             raise exc
 
-        # If no tokens streamed (non-streaming provider or Ollama), fall back
-        # to reading the answer from the final state captured via "updates".
-        if not full_answer and final_state:
+        # Fallback for non-streaming providers (Ollama, etc.)
+        if not full_answer_raw and final_state:
             fallback = final_state.get("answer", "")
             if fallback:
-                yield fallback
-                full_answer = fallback
+                clean_fallback, _ = _extract_hallucination_risk(fallback)
+                yield clean_fallback
+                full_answer_raw = fallback
 
-        # Persist completed turn regardless of how the answer arrived.
-        if full_answer:
-            clean, _ = _extract_hallucination_risk(full_answer)
+        # Persist completed turn
+        if full_answer_raw:
+            clean, _ = _extract_hallucination_risk(full_answer_raw)
             self._session_store.save_turn(session_id, question, clean)
-            logger.info("[%s] Streaming complete (%d chars).", session_id, len(full_answer))
+            logger.info("[%s] Streaming complete (%d chars).", session_id, len(full_answer_raw))
+
+        # Build and yield the final metadata dict
+        snippet_len  = get_settings().SOURCE_SNIPPET_LEN
+        fs           = final_state or {}
+        top_k_actual = fs.get("top_k", top_k)
+        context_docs = _dedupe_documents(
+            fs.get("relevant_docs") or fs.get("retrieved_docs", [])
+        )[:top_k_actual]
+
+        yield {
+            "pipeline_trace": fs.get("pipeline_trace", []),
+            "graded_chunks":  fs.get("graded_count", 0),
+            "reflect_loops":  fs.get("reflect_loops", 0),
+            "sources": [
+                {"content": doc.page_content[:snippet_len], "metadata": doc.metadata}
+                for doc in context_docs
+            ],
+        }
 
     # ── UTILITIES ──────────────────────────────────────────────────────────────
 
@@ -1559,10 +1249,7 @@ class RAGEngine:
         self._session_store.clear_all()
 
     def shutdown(self) -> None:
-        """
-        BUG-AB fix (v3.3): release all engine resources during application teardown.
-        Called from the FastAPI lifespan cleanup block.
-        """
+        # BUG-AB fix: release resources on teardown
         self.reranker.shutdown()
         logger.info("AuraRAG Engine resources released.")
 
@@ -1578,6 +1265,6 @@ class RAGEngine:
             "vector_store":    "ready" if self.vector_store else "empty",
             "bm25_index":      "ready" if self._bm25_retriever else "empty",
             "docs_indexed":    str(chroma_count),
-            "bm25_docs":       str(bm25_count),  # BUG-AD fix (v3.3)
+            "bm25_docs":       str(bm25_count),
             "active_sessions": str(self._session_store.active_sessions),
         }

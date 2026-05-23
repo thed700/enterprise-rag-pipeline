@@ -1,45 +1,46 @@
 #!/bin/bash
 set -e
 
+# ─────────────────────────────────────────────────────────────────────────────
+# entrypoint.sh — AuraRAG v3.6
+# Orchestrates FastAPI backend + Streamlit frontend for HF Spaces / Docker.
+# ─────────────────────────────────────────────────────────────────────────────
+
 # 1. Ensure the project root is in the Python path
 export PYTHONPATH=$(pwd):$PYTHONPATH
 
 # 2. Configure environment variables for runtime
-export ALLOWED_ORIGINS="*"
-export API_BASE="http://127.0.0.1:8000" # localhost o'rniga 127.0.0.1 ishlatildi
+export ALLOWED_ORIGINS="${ALLOWED_ORIGINS:-*}"
+export API_BASE="${API_BASE:-http://localhost:8000}"
 
-# 3. Start FastAPI backend and save its Process ID
+# 3. Ensure writable cache directory exists (needed on HF Spaces read-only FS)
+export AURARAG_CACHE_DIR="${AURARAG_CACHE_DIR:-/tmp/aurarag}"
+mkdir -p "$AURARAG_CACHE_DIR"
+
+# 4. Start FastAPI backend in the background
+echo "[entrypoint] Starting FastAPI backend on port 8000..."
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1 &
 BACKEND_PID=$!
 
-# 4. Wait for the backend to be fully healthy before launching UI
-echo "Waiting for FastAPI backend to start..."
-BACKEND_UP=false
-
-for i in {1..30}; do
-    # Server haliyam ishlayotganini tekshirish
-    if ! kill -0 $BACKEND_PID 2>/dev/null; then
-        echo "❌ FastAPI backend ishga tushmadi yoki qulab tushdi! Jurnallarni (Logs) tekshiring."
+# 5. Wait for the backend to be healthy before launching the UI
+echo "[entrypoint] Waiting for backend to be ready..."
+MAX_WAIT=60
+WAITED=0
+until curl -sf http://localhost:8000/health > /dev/null 2>&1; do
+    if [ "$WAITED" -ge "$MAX_WAIT" ]; then
+        echo "[entrypoint] ERROR: backend did not start within ${MAX_WAIT}s"
+        kill "$BACKEND_PID" 2>/dev/null || true
         exit 1
     fi
-
-    # Sog'lomlik holatini tekshirish
-    if curl -sf http://127.0.0.1:8000/health > /dev/null 2>&1; then
-        echo "✅ Backend muvaffaqiyatli ishga tushdi!"
-        BACKEND_UP=true
-        break
-    fi
-    echo "  urinish $i/30..."
+    echo "[entrypoint]   ... waiting (${WAITED}s)"
     sleep 2
+    WAITED=$((WAITED + 2))
 done
+echo "[entrypoint] Backend is healthy."
 
-if [ "$BACKEND_UP" = false ]; then
-    echo "❌ FastAPI backend o'z vaqtida javob bermadi."
-    exit 1
-fi
-
-# 5. Launch Streamlit on HF Spaces port 7860
-streamlit run app/ui.py \
+# 6. Launch Streamlit on HF Spaces port 7860
+echo "[entrypoint] Starting Streamlit UI on port 7860..."
+exec streamlit run app/ui.py \
     --server.port 7860 \
     --server.address 0.0.0.0 \
     --server.headless true \

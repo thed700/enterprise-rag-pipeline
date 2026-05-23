@@ -1,19 +1,14 @@
-# FORCE REBUILD: 2026-05-22_10-30
-# ----------------------------------------
-
-# requirements.txt — AuraRAG v3.5
+# requirements.txt — AuraRAG v3.6
 #
-# Changes v3.5:
-#   No new dependencies. All bug fixes (BUG-AK through BUG-AO) are code-only.
+# Changes v3.6:
+#   BUG-UNSTRUCTURED fix: removed `unstructured` — it is never imported in the
+#   codebase and pulls in a ~2 GB dependency tree (detectron2, tesseract
+#   bindings, etc.) that causes pip timeouts on Hugging Face Spaces and bloats
+#   the Docker image significantly.
 #
-# Changes v3.4:
-#   Added langgraph>=0.2.0          — core dependency for the agentic pipeline.
-#   Added langgraph-checkpoint>=1.0.0 — required for StateGraph compilation.
-#
-# Retained from v3.3 / v3.2.0:
-#   BUG-W fix: python-magic for TextLoader autodetect_encoding.
-#   CPU-only torch installed first in Dockerfile via the PyTorch index URL.
-#   NO 'langchain-classic' — it does not exist on PyPI.
+# Changes v3.5 / v3.4:
+#   CPU-only torch installed first via the PyTorch index URL in Dockerfile.
+#   Added langgraph, langgraph-checkpoint for the agentic pipeline.
 
 # ── LangGraph — agentic pipeline (v3.4+) ─────────────────────────────────────
 langgraph>=0.2.0
@@ -24,7 +19,6 @@ langchain>=0.2.0
 langchain-core>=0.2.0
 langchain-community>=0.2.0
 langchain-text-splitters>=0.2.0
-# NOTE: 'langchain-classic' does NOT exist on PyPI — do not add it.
 langchain-openai>=0.1.0
 langchain-anthropic>=0.1.0
 langchain-google-genai>=1.0.0
@@ -43,6 +37,7 @@ rank-bm25>=0.2.2
 
 # ── Document loaders ──────────────────────────────────────────────────────────
 pypdf>=4.0.0
+# NOTE: `unstructured` intentionally removed — not used anywhere in the codebase.
 # BUG-W fix: autodetect_encoding in TextLoader requires python-magic
 python-magic>=0.4.27
 

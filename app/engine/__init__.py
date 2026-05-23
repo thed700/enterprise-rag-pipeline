@@ -1,5 +1,5 @@
 """
-app/engine/__init__.py — AuraRAG v3.5
+app/engine/__init__.py — AuraRAG v3.6
 Re-exports the public API from the pipeline module so that any existing
 code importing from `app.engine` continues to work unchanged.
 """
