@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.eggs/
+*.egg-info/
+dist/
+build/
+*.so
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Secrets — NEVER commit
+.env
+!.env.example
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Data & persisted state
+data/chroma_db/
+data/bm25.pkl
+data/*.pdf
+data/*.txt
+!data/README.md
+
+# Docker
+*.log
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

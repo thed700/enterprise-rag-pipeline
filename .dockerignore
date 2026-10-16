@@ -1,0 +1,30 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Data (mounted as volumes)
+data/chroma_db/
+data/bm25.pkl
+data/*.pdf
+data/*.txt
+
+# Dev artifacts
+.venv/
+venv/
+env/
+.git/
+.gitignore
+*.log
+htmlcov/
+.coverage
+
+# IDEs
+.vscode/
+.idea/

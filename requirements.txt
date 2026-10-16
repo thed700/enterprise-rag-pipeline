@@ -1,0 +1,73 @@
+# requirements.txt — AuraRAG v3.7
+#
+# Changes v3.7:
+#   BUG-LC-UNPINNED: every LangChain package was `>=` with no upper bound. The
+#   code imports `langchain.memory.ConversationBufferWindowMemory` and
+#   `langchain.retrievers.ensemble.EnsembleRetriever`, which no longer exist in
+#   langchain 1.x — a fresh `pip install` today pulls 1.x and the app dies at
+#   import. The LangChain family is now capped below 1.0 (migrate to
+#   langchain-classic before lifting the cap).
+#   BUG-DEPS-MISSING: added `chardet` (TextLoader autodetect_encoding needs it —
+#   the old comment wrongly blamed python-magic) and `xlrd` (required by pandas
+#   to read legacy .xls uploads, which the API advertises).
+#   Removed `python-magic` and `redis`: neither is imported anywhere.
+#
+# Changes v3.6:
+#   Removed `unstructured` (never imported, ~2 GB of dependencies).
+#
+# CPU-only torch is installed first in the Dockerfile via the PyTorch index URL.
+
+# ── LangGraph — agentic pipeline (v3.4+) ─────────────────────────────────────
+langgraph>=0.2.0,<2.0
+langgraph-checkpoint>=1.0.0,<4.0
+
+# ── LangChain — core + community + provider integrations ─────────────────────
+langchain>=0.3.0,<1.0
+langchain-core>=0.3.0,<1.0
+langchain-community>=0.3.0,<1.0
+langchain-text-splitters>=0.3.0,<1.0
+langchain-openai>=0.2.0,<1.0
+langchain-anthropic>=0.3.0,<1.0
+langchain-google-genai>=2.0.0,<3.0
+langchain-ollama>=0.2.0,<1.0
+
+# ── Vector store ──────────────────────────────────────────────────────────────
+chromadb>=0.5.0,<2.0
+
+# ── Embeddings + re-ranking ───────────────────────────────────────────────────
+# CPU-only torch should be installed first in the Dockerfile via the PyTorch
+# index URL to avoid pulling the GPU variant (several GB).
+sentence-transformers>=3.0.0
+
+# ── BM25 ──────────────────────────────────────────────────────────────────────
+rank-bm25>=0.2.2
+
+# ── Document loaders ──────────────────────────────────────────────────────────
+pypdf>=4.0.0
+# NOTE: `unstructured` intentionally removed — not used anywhere in the codebase.
+# TextLoader(autodetect_encoding=True) needs chardet (NOT python-magic)
+chardet>=5.2.0
+
+# ── API ───────────────────────────────────────────────────────────────────────
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0
+python-multipart>=0.0.9
+pydantic>=2.7.0
+pydantic-settings>=2.3.0
+
+# ── Rate limiting ─────────────────────────────────────────────────────────────
+slowapi>=0.1.9
+
+# ── UI ────────────────────────────────────────────────────────────────────────
+streamlit>=1.35.0
+requests>=2.32.0
+
+# ── Utilities ─────────────────────────────────────────────────────────────────
+python-dotenv>=1.0.0
+
+# ── Structured ingestion / UI rendering ──────────────────────────────────────
+pandas>=2.2.0
+openpyxl>=3.1.0
+xlrd>=2.0.1   # legacy .xls uploads
+pyarrow>=16.0.0
+mistune>=3.0.0

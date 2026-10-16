@@ -1,0 +1,116 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# docker-compose.yml — AuraRAG v3.7
+# Author: Akmal Raxmatov (github: thed700)
+#
+# Changes v3.7:
+#   - Header/version refreshed. Requires a .env file (cp .env.example .env).
+#
+# Changes v3.3:
+#   - Version strings bumped to 3.3 in labels.
+#   - Redis service enabled (previously commented out) to back the session
+#     memory store in a future v3.2.x patch; wired via REDIS_URL env var.
+#     Still optional: comment out the redis service and unset REDIS_URL to
+#     fall back to the in-process SessionMemoryStore.
+#   - api service gains REDIS_URL env var passed through.
+#
+# Retained from v3.1.0:
+#   BUG-M: No deprecated top-level 'version:' key.
+#   BUG-N: Per-service HEALTHCHECK so API (8000) and UI (8501) use correct port.
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── FastAPI Backend ──────────────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runner
+    container_name: aurarag_api
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
+    ports:
+      - "8000:8000"
+    networks:
+      - internal
+    volumes:
+      - chroma_data:/app/data/chroma_db
+    env_file:
+      - .env
+    environment:
+      - LOG_LEVEL=INFO
+      - ALLOWED_ORIGINS=http://localhost:8501,http://ui:8501
+      # Uncomment once Redis session store is wired (v3.2.x):
+      # - REDIS_URL=redis://redis:6379/0
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+    restart: unless-stopped
+
+  # ── Streamlit Frontend ───────────────────────────────────────────────────────
+  ui:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runner
+    container_name: aurarag_ui
+    command: streamlit run app/ui.py --server.port 8501 --server.address 0.0.0.0 --server.headless true
+    ports:
+      - "8501:8501"
+    networks:
+      - internal
+    env_file:
+      - .env
+    environment:
+      - API_BASE=http://api:8000
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health')"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Redis (session memory persistence) ───────────────────────────────────────
+  # Wire up REDIS_URL=redis://redis:6379/0 in api environment above to activate.
+  # Comment out this whole service to run with in-process session memory only.
+  #
+  # redis:
+  #   image: redis:7-alpine
+  #   container_name: aurarag_redis
+  #   networks:
+  #     - internal
+  #   volumes:
+  #     - redis_data:/data
+  #   command: redis-server --appendonly yes
+  #   restart: unless-stopped
+
+  # ── Ollama (optional local LLM) ──────────────────────────────────────────────
+  #
+  # ollama:
+  #   image: ollama/ollama:latest
+  #   container_name: aurarag_ollama
+  #   ports:
+  #     - "11434:11434"
+  #   networks:
+  #     - internal
+  #   volumes:
+  #     - ollama_data:/root/.ollama
+  #   restart: unless-stopped
+
+networks:
+  internal:
+    driver: bridge
+
+volumes:
+  chroma_data:
+    driver: local
+  # redis_data:
+  #   driver: local
+  # ollama_data:
+  #   driver: local
